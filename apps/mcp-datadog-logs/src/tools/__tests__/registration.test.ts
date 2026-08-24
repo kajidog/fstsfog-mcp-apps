@@ -24,6 +24,8 @@ describe('createServer tool registration', () => {
         'datadog_aggregate_logs',
         'datadog_get_trace',
         'datadog_search_events',
+        'datadog_query_metrics',
+        'datadog_list_monitors',
         'datadog_run_investigation',
         'datadog_get_session_logs',
         'datadog_export_report',
@@ -46,6 +48,9 @@ describe('createServer tool registration', () => {
     // trace/event correlation tools are model-facing and must not open the UI
     expect(tools.datadog_get_trace._meta?.ui).toBeUndefined()
     expect(tools.datadog_search_events._meta?.ui).toBeUndefined()
+    // metric/monitor correlation tools are model-facing and must not open the UI
+    expect(tools.datadog_query_metrics._meta?.ui).toBeUndefined()
+    expect(tools.datadog_list_monitors._meta?.ui).toBeUndefined()
     // headless investigation tool is model-facing and must not open the UI
     expect(tools.datadog_run_investigation._meta?.ui).toBeUndefined()
     // session drill-down tool is model-facing and must not open the UI

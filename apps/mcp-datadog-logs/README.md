@@ -12,6 +12,9 @@ needed).
 - 📊 `datadog_aggregate_logs` — counts by facet or timeseries for the model
 - 📈 `datadog_query_metrics` — metric timeseries for the model (classic query
   syntax, per-series stats + downsampled values as compact text)
+- 🚨 `datadog_list_monitors` — monitors and their current state for the model
+  (state / tag / name filters or a raw Datadog monitor search query; one line per
+  monitor with status, last trigger age and the monitor query)
 - 🕵️ `datadog_run_investigation` — headless investigation for the model:
   - full result (log rows, timeline, facets) stored server-side under a `viewUUID`
   - the model receives only a compact summary — iterate without bloating context
@@ -48,8 +51,9 @@ needed).
 
 Requires Node.js >= 20 and a Datadog API key + application key
 (the application key needs the `logs_read_data` scope; add `apm_read` for
-`datadog_get_trace`, `events_read` for `datadog_search_events`, and
-`timeseries_query` for `datadog_query_metrics`).
+`datadog_get_trace`, `events_read` for `datadog_search_events`,
+`timeseries_query` for `datadog_query_metrics`, and `monitors_read` for
+`datadog_list_monitors`).
 
 ### Claude Code
 
@@ -98,7 +102,7 @@ were created. Japan is `ap1.datadoghq.com`; US1 is `datadoghq.com`.
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `DD_API_KEY` | ✅ | — | Datadog API key |
-| `DD_APP_KEY` | ✅ | — | Datadog application key from the same org/site as `DD_API_KEY` (`logs_read_data` scope; `apm_read` / `events_read` for the trace and events tools) |
+| `DD_APP_KEY` | ✅ | — | Datadog application key from the same org/site as `DD_API_KEY` (`logs_read_data` scope; `apm_read` / `events_read` / `timeseries_query` / `monitors_read` for the trace, events, metrics and monitors tools) |
 | `DD_SITE` | | `datadoghq.com` | Datadog site, e.g. `ap1.datadoghq.com`, `datadoghq.eu`, `us5.datadoghq.com` |
 | `DD_LOGS_INDEXES` | | all | Comma-separated log indexes to search |
 | `MCP_DATADOG_EXPORT_DIR` | | `~/Downloads` (or cwd) | Where exported reports / data files are written |
@@ -119,6 +123,7 @@ Required Datadog permissions are documented in
 | `datadog_get_trace` | model | Render one APM trace as a parent/child span tree. Runs of identical leaf siblings collapse into one `xN` line (`collapse: false` to disable); `errors_only` renders just error spans + their ancestors; `max_spans` caps the output |
 | `datadog_search_events` | model | Search Datadog events (deployments, monitor alerts, config changes) as a compact timeline; `max_tags: 0` hides tags |
 | `datadog_query_metrics` | model | Query metric timeseries with the classic syntax (`avg:system.cpu.user{service:web} by {host}`); per-series stats + downsampled values, `max_series` caps group-by fan-out |
+| `datadog_list_monitors` | model | List monitors with state, last trigger age and query. Filter by `state` (`alert` / `warn` / `no data` / `ok` / `all`, aliases accepted), `tags`, `name` — or pass a raw monitor search `query` (which overrides the three). `sort` by `status`, `name` or `last_triggered` |
 | `datadog_run_investigation` | model | Headless investigation stored in a server-side session; returns a compact summary + `viewUUID`. Iterate on the same `viewUUID`, load more rows with `cursor`, attach `findings`. Also fetches events in the window (`includeEvents` / `eventsQuery`) and metrics (`metricsQueries`), and lists trace candidates extracted from the fetched rows |
 | `datadog_get_session_logs` | model | Read rows already stored under a `viewUUID` — no Datadog API call. List mode filters by `status` / `service` / `pattern` (the summary's `#N`) / `contains` with `offset`/`limit`; detail mode (`row` or `logId`) returns one full raw log, with `fields` to select attribute paths |
 | `datadog_export_report` | model | Write a `viewUUID` session to `MCP_DATADOG_EXPORT_DIR` as a self-contained HTML report, or as CSV/JSON of the fetched rows (`format`) — no UI needed |

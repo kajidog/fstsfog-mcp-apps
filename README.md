@@ -85,6 +85,7 @@ MCP Apps 対応クライアントでは、タイムライン・ファセット�
 - **ログ検索・集計** — モデル向けのコンパクトなテキスト出力。ファセット別カウントや、`interval` 指定でファセット別の時系列集計
 - **横断調査** — 調査ツールに `metricsQueries` を渡すと、ログと同じ時間窓のイベント（デプロイ・アラート）とメトリクスを一括取得し、タイムラインに重畳表示。ログ行から抽出した trace_id は「トレース候補」として要約に提示され、`datadog_get_trace` にそのままピボットできる（`events_read` / `timeseries_query` が無い場合は該当データだけスキップ）
 - **メトリクスクエリ** — `datadog_query_metrics` でメトリクス時系列（例 `avg:system.cpu.user{service:web} by {host}`）を系列ごとの統計値＋ダウンサンプル値のコンパクトなテキストで取得
+- **モニター一覧** — `datadog_list_monitors` で今アラート中のモニターを状態・最終トリガー時刻・クエリ付きの1行テキストで確認（state / tag / 名前での絞り込み、または Datadog のモニター検索クエリをそのまま指定）
 - **ヘッドレス調査** — 調査結果（ログ行・タイムライン・ファセット・イベント・メトリクス）はサーバー側セッションに保持し、モデルには要約と `viewUUID` だけを返すのでコンテキストを圧迫しない
 - **セッション掘り下げ** — `datadog_get_session_logs` で保持済みの行を Datadog API を呼ばずに絞り込み（status / service / パターン `#N` / 部分一致）、`row=[N]` や `logId` で生ログ1件を取得
 - **MCP Apps UI での調査画面** — タイムラインチャート（イベントマーカー重畳）、イベントリスト、メトリクスパネル、ファセットサイドバー、メッセージパターンパネル、ログテーブル（trace_id チップ付き。クリックで絞り込み、UI からクエリ・期間を変えて再実行）
@@ -110,7 +111,7 @@ Japan site の場合、MCP 側も必ず `DD_SITE=ap1.datadoghq.com` を指定し
 
 詳細は [apps/mcp-datadog-logs/README.md](./apps/mcp-datadog-logs/README.md) を見てください。
 
-Datadog Application Key に必要な権限は [docs/datadog-permissions.md](./docs/datadog-permissions.md) にまとめています。
+Datadog Application Key に必要な権限は [docs/datadog-permissions.md](./docs/datadog-permissions.md) にまとめています（ログ系は `logs_read_data`、trace は `apm_read`、イベントは `events_read`、メトリクスは `timeseries_query`、モニターは `monitors_read`）。
 
 ## 開発
 
