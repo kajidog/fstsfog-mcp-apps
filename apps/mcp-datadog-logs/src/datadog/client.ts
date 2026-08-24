@@ -292,7 +292,11 @@ export function describeDatadogError(error: unknown, requiredScope = 'logs_read_
     return `Could not reach the Datadog API. Check network access and DD_SITE. Details: ${message}`
   }
   // Config/validation errors raised by this server already carry actionable text.
-  if (/credentials are not configured|Unrecognized time value|Invalid time range/.test(message)) {
+  if (
+    /credentials are not configured|Unrecognized time value|Invalid time range|Unrecognized baseline|Invalid baseline/.test(
+      message
+    )
+  ) {
     return message
   }
   return `Datadog API error: ${message}`
