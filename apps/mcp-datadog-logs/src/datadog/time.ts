@@ -78,15 +78,30 @@ export interface BaselineSpec {
 const PREVIOUS_ALIASES = new Set(['prev', 'previous', 'preceding', 'before', 'last'])
 const DAY_ALIASES = new Set(['yesterday', 'day', '1d', '24h', 'dod'])
 const WEEK_ALIASES = new Set(['lastweek', 'week', '1w', '7d', 'wow'])
-const SHIFT_PATTERN = /^-?(\d+)(m|h|d|w)$/
+// Matched against the trimmed/lowercased value (not the whitespace-stripped one) so that
+// "3 d" still parses while "1 2 d" is rejected instead of gluing into a 12-day shift.
+const SHIFT_PATTERN = /^[+-]?(\d+)\s*(m|h|d|w)$/
+// Callers reach for this server's own time-math spelling ("now-4h"), so accept that prefix too.
+const SHIFT_NOW_PREFIX = /^now\s*-?\s*/
+/** Two digits separated by whitespace — a typo, not a shift the caller meant. */
+const DIGIT_GAP_PATTERN = /\d\s+\d/
+
+function unrecognizedBaseline(value: string | undefined): Error {
+  return new Error(
+    `Unrecognized baseline: "${value}". Use "previous", "1d", "1w", a shift like "4h"/"3d", or baselineFrom/baselineTo.`
+  )
+}
 
 /**
  * Parses a baseline selector supplied by an LLM caller into a {@link BaselineSpec}.
  *
  * Matching is deliberately forgiving: the value is trimmed, lowercased and stripped of
  * internal whitespace before aliases are considered, so "Last Week", "lastweek" and
- * "1w" all resolve to the same weekly shift. An empty or missing value means
- * "the window immediately preceding the target".
+ * "1w" all resolve to the same weekly shift. Numeric shifts are matched on the trimmed
+ * value instead, so a stray gap between digits ("1 2 d") is rejected rather than silently
+ * read as "12d"; a leading "now-" or "+" is accepted since a baseline is always backwards
+ * by construction. An empty or missing value means "the window immediately preceding the
+ * target".
  *
  * Known limitation: day/week/generic shifts are fixed millisecond offsets, so a window
  * that crosses a daylight-saving-time boundary lands an hour off in wall-clock terms.
@@ -95,10 +110,20 @@ const SHIFT_PATTERN = /^-?(\d+)(m|h|d|w)$/
  * @throws if the value matches no alias or shift pattern, or resolves to a zero shift.
  */
 export function parseBaselineSpec(value: string | undefined): BaselineSpec {
-  const compact = (value ?? '').trim().toLowerCase().replace(/\s+/g, '')
-  if (compact === '') {
+  const raw = (value ?? '').trim().toLowerCase()
+  if (raw === '') {
     return { mode: 'previous' }
   }
+  // Whitespace between two digits is a typo, never intent: "1 2 d" must not
+  // silently become a twelve-day shift. Rejected before any whitespace-
+  // insensitive lookup, so the alias path cannot smuggle "2 4 h" through as 1d.
+  if (DIGIT_GAP_PATTERN.test(raw)) {
+    throw unrecognizedBaseline(value)
+  }
+  // Strip the "now-" prefix first so "now-24h" reaches the same alias table as
+  // "24h" and echoes the same canonical label.
+  const body = raw.replace(SHIFT_NOW_PREFIX, '')
+  const compact = body.replace(/\s+/g, '')
   if (PREVIOUS_ALIASES.has(compact)) {
     return { mode: 'previous' }
   }
@@ -110,7 +135,7 @@ export function parseBaselineSpec(value: string | undefined): BaselineSpec {
   if (WEEK_ALIASES.has(compact)) {
     return { mode: 'shift', shiftMs: UNIT_MS.w, label: '1w' }
   }
-  const shift = compact.match(SHIFT_PATTERN)
+  const shift = body.match(SHIFT_PATTERN)
   if (shift) {
     const amount = Number.parseInt(shift[1], 10)
     const unit = shift[2]
@@ -119,19 +144,59 @@ export function parseBaselineSpec(value: string | undefined): BaselineSpec {
       return { mode: 'shift', shiftMs, label: `${amount}${unit}` }
     }
   }
-  throw new Error(
-    `Unrecognized baseline: "${value}". Use "previous", "1d", "1w", a shift like "4h"/"3d", or baselineFrom/baselineTo.`
-  )
+  throw unrecognizedBaseline(value)
+}
+
+/** A bound counts only when it survives trimming; blank strings are treated as absent. */
+function usableBound(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : undefined
+}
+
+/**
+ * The mode a run actually used, given a parsed spec and any explicit bounds.
+ *
+ * Callers echo this onto `ComparisonParams.mode`, so it must apply the very same
+ * blank-detection rule as {@link resolveBaselineRange} — otherwise a run could be
+ * labelled 'custom' while the resolver rejected the bounds (or vice versa).
+ */
+export function effectiveBaselineMode(spec: BaselineSpec, explicit?: { from?: string; to?: string }): BaselineMode {
+  const bound = usableBound(explicit?.from) ?? usableBound(explicit?.to)
+  return bound ? 'custom' : spec.mode
+}
+
+/**
+ * Validates a resolved baseline window, reporting the caller's own spelling for the
+ * bound they supplied and the resolved instant for the one derived here — never
+ * `undefined` or an empty string, since this text reaches the model verbatim.
+ */
+function checkedBaseline(
+  fromMs: number,
+  toMs: number,
+  explicitFrom: string | undefined,
+  explicitTo: string | undefined
+): ResolvedRange {
+  if (fromMs >= toMs) {
+    const fromLabel = explicitFrom ?? new Date(fromMs).toISOString()
+    const toLabel = explicitTo ?? new Date(toMs).toISOString()
+    throw new Error(`Invalid baseline range: baselineFrom (${fromLabel}) must be before baselineTo (${toLabel}).`)
+  }
+  return { fromMs, toMs }
 }
 
 /**
  * Resolves the baseline window to compare a target window against.
  *
- * An explicit `from` wins over `spec` and is treated as mode 'custom'; when `to` is
- * omitted the baseline inherits the target's duration. Otherwise 'previous' takes the
- * window immediately before the target and 'shift' slides the whole target window back
- * by `spec.shiftMs`. In every mode the baseline has exactly the target's length, which
- * is what makes the two windows comparable.
+ * Either explicit bound wins over `spec` and is treated as mode 'custom' (see
+ * {@link effectiveBaselineMode}); the missing side inherits the target's duration, so
+ * `from` alone anchors the start and `to` alone anchors the end. Otherwise 'previous'
+ * takes the window immediately before the target and 'shift' slides the whole target
+ * window back by `spec.shiftMs`. In every mode the baseline has exactly the target's
+ * length, which is what makes the two windows comparable — note that 'shift' applies a
+ * fixed millisecond offset, with the DST caveat documented on {@link parseBaselineSpec}.
+ *
+ * Mode 'custom' with no usable bound throws rather than quietly falling back, because a
+ * result labelled 'custom' over the preceding window would not be reproducible.
  *
  * Overlap with the target window is only reachable through explicit bounds and is not
  * an error here — callers can detect it with {@link rangesOverlap} and surface a notice.
@@ -143,15 +208,19 @@ export function resolveBaselineRange(
   nowMs: number = Date.now()
 ): ResolvedRange {
   const duration = target.toMs - target.fromMs
-  const explicitFrom = explicit?.from?.trim()
+  const explicitFrom = usableBound(explicit?.from)
+  const explicitTo = usableBound(explicit?.to)
   if (explicitFrom) {
-    const explicitTo = explicit?.to?.trim()
     const fromMs = parseTimeInput(explicitFrom, nowMs)
     const toMs = explicitTo ? parseTimeInput(explicitTo, nowMs) : fromMs + duration
-    if (fromMs >= toMs) {
-      throw new Error(`Invalid time range: baselineFrom (${explicitFrom}) must be before baselineTo (${explicitTo}).`)
-    }
-    return { fromMs, toMs }
+    return checkedBaseline(fromMs, toMs, explicitFrom, explicitTo)
+  }
+  if (explicitTo) {
+    const toMs = parseTimeInput(explicitTo, nowMs)
+    return checkedBaseline(toMs - duration, toMs, undefined, explicitTo)
+  }
+  if (spec.mode === 'custom') {
+    throw new Error('Invalid baseline: mode "custom" requires baselineFrom or baselineTo.')
   }
   if (spec.mode === 'shift') {
     const shiftMs = spec.shiftMs
@@ -160,8 +229,7 @@ export function resolveBaselineRange(
     }
     return { fromMs: target.fromMs - shiftMs, toMs: target.toMs - shiftMs }
   }
-  // 'previous', and 'custom' without usable explicit bounds, fall back to the
-  // window immediately preceding the target.
+  // 'previous': the window immediately preceding the target.
   return { fromMs: target.fromMs - duration, toMs: target.fromMs }
 }
 
