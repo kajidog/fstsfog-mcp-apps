@@ -34,6 +34,19 @@ function createEventsClient() {
   return { client, searchEvents }
 }
 
+/** Configured with log indexes on purpose: monitors must never inherit them. */
+function createMonitorsClient() {
+  const searchMonitors = vi.fn()
+  const client = new DatadogLogsClient({
+    apiKey: 'test-api-key',
+    appKey: 'test-app-key',
+    site: 'datadoghq.com',
+    indexes: ['idx'],
+  })
+  ;(client as unknown as { monitorsApi: { searchMonitors: typeof searchMonitors } }).monitorsApi = { searchMonitors }
+  return { client, searchMonitors }
+}
+
 describe('DatadogLogsClient aggregation', () => {
   it('uses the requested facet for a timeseries aggregation', async () => {
     const { client, aggregateLogs } = createClient()
@@ -137,5 +150,45 @@ describe('DatadogLogsClient.searchEvents', () => {
     searchEvents.mockResolvedValue({})
 
     await expect(client.searchEvents({ query: '*', from: 'now-1d', to: 'now', limit: 5 })).resolves.toEqual([])
+  })
+})
+
+describe('DatadogLogsClient.searchMonitors', () => {
+  it('never sends log index scoping to the monitors search', async () => {
+    const { client, searchMonitors } = createMonitorsClient()
+    searchMonitors.mockResolvedValue({ monitors: [{ id: 1 }], metadata: { totalCount: 7 } })
+
+    const result = await client.searchMonitors({ query: 'status:Alert', perPage: 25 })
+
+    // Exact match: no `indexes` key, and no `sort` key when the caller supplied none.
+    expect(searchMonitors).toHaveBeenCalledWith({ query: 'status:Alert', page: 0, perPage: 25 })
+    expect(JSON.stringify(searchMonitors.mock.calls[0][0])).not.toContain('idx')
+    expect(result).toEqual({ monitors: [{ id: 1 }], totalCount: 7 })
+  })
+
+  it('forwards the API sort key and page when supplied', async () => {
+    const { client, searchMonitors } = createMonitorsClient()
+    searchMonitors.mockResolvedValue({ monitors: [] })
+
+    await client.searchMonitors({ query: '*', perPage: 100, page: 2, sort: 'status,asc' })
+
+    expect(searchMonitors).toHaveBeenCalledWith({ query: '*', page: 2, perPage: 100, sort: 'status,asc' })
+  })
+
+  it('omits totalCount when Datadog reports no metadata', async () => {
+    const { client, searchMonitors } = createMonitorsClient()
+    searchMonitors.mockResolvedValue({ monitors: [{ id: 1 }] })
+
+    const result = await client.searchMonitors({ query: '*', perPage: 25 })
+
+    expect('totalCount' in result).toBe(false)
+    expect(result.monitors).toEqual([{ id: 1 }])
+  })
+
+  it('returns an empty monitor list when the response has none', async () => {
+    const { client, searchMonitors } = createMonitorsClient()
+    searchMonitors.mockResolvedValue({ metadata: {} })
+
+    await expect(client.searchMonitors({ query: '*', perPage: 25 })).resolves.toEqual({ monitors: [] })
   })
 })
