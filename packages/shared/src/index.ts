@@ -275,7 +275,13 @@ export interface OnsetDetection {
 export interface ComparisonParams {
   /** Datadog logs query both windows are measured with */
   query: string
-  /** Extra filter applied to the pattern/facet samples, e.g. "status:error" */
+  /**
+   * Extra filter applied to the pattern sample only, e.g. "status:error".
+   * Facet aggregations deliberately stay unscoped: their coverage is measured
+   * against the same window totals the status aggregation produces, and an
+   * error-only facet count against an all-status total would read as truncated
+   * every time, permanently suppressing the "new value" signal.
+   */
   scope?: string
   mode: BaselineMode
   /** Shift applied for mode "shift", e.g. "1d" */
