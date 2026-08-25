@@ -467,10 +467,16 @@ export function correlateOnsetEvents(
 
   // Latest event strictly before the onset — the most likely trigger.
   const precedingIndex = findLastIndex(timed, (entry) => entry.timeMs < onsetMs)
+  // Closest to the onset wins the limited slots, then they are presented in
+  // order. Slicing the chronological list instead would keep the *oldest*
+  // events in range and drop the deploy that landed on the onset itself.
   const nearby = timed
     .filter((_, index) => index !== precedingIndex)
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => Math.abs(a.entry.timeMs - onsetMs) - Math.abs(b.entry.timeMs - onsetMs) || a.index - b.index)
     .slice(0, ONSET_NEARBY_EVENT_LIMIT)
-    .map((entry) => toOnsetEvent(entry.event, entry.timeMs, onsetMs))
+    .sort((a, b) => a.index - b.index)
+    .map(({ entry }) => toOnsetEvent(entry.event, entry.timeMs, onsetMs))
 
   return {
     ...(precedingIndex >= 0

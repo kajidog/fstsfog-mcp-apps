@@ -490,7 +490,7 @@ describe('correlateOnsetEvents', () => {
     expect('nearbyEvents' in result).toBe(false)
   })
 
-  it('caps nearbyEvents chronologically and excludes the one chosen as precedingEvent', () => {
+  it('fills the nearbyEvents slots by proximity to the onset, then orders them chronologically', () => {
     const result = correlateOnsetEvents(
       BASE_MS,
       [
@@ -503,9 +503,29 @@ describe('correlateOnsetEvents', () => {
       MINUTE
     )
     expect(result.precedingEvent?.event.id).toBe('e-05')
-    expect(result.nearbyEvents?.map((entry) => entry.event.id)).toEqual(['e-25', 'e-20', 'e-15'])
+    // The three closest survive the cap; e-25 and e-20 are the stale ones dropped.
+    expect(result.nearbyEvents?.map((entry) => entry.event.id)).toEqual(['e-20', 'e-15', 'e-10'])
     const leadTimes = result.nearbyEvents?.map((entry) => entry.leadTimeMs) ?? []
-    expect(leadTimes).toEqual([25 * MINUTE, 20 * MINUTE, 15 * MINUTE])
+    expect(leadTimes).toEqual([20 * MINUTE, 15 * MINUTE, 10 * MINUTE])
+  })
+
+  it('keeps an event landing on the onset over older ones competing for the same slots', () => {
+    const result = correlateOnsetEvents(
+      BASE_MS,
+      [
+        event('e-25', -25 * MINUTE),
+        event('e-20', -20 * MINUTE),
+        event('e-15', -15 * MINUTE),
+        event('e-05', -5 * MINUTE),
+        event('at-onset', 30 * 1000),
+      ],
+      MINUTE
+    )
+    expect(result.precedingEvent?.event.id).toBe('e-05')
+    // A deploy landing on the onset is the likeliest cause; chronological
+    // slicing used to drop it in favour of an event 25 minutes stale.
+    expect(result.nearbyEvents?.map((entry) => entry.event.id)).toContain('at-onset')
+    expect(result.nearbyEvents?.map((entry) => entry.event.id)).toEqual(['e-20', 'e-15', 'at-onset'])
   })
 
   it('omits both keys when nothing is in range', () => {
