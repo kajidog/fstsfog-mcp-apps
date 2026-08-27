@@ -43,10 +43,13 @@ MCP hosts forward only tool-result *text* to the embedded app (no `structuredCon
 - `server.ts` registers everything; `datadog/` wraps the Datadog API client (query, normalize raw logs, time parsing)
 - `tools/search-logs.ts`, `tools/aggregate-logs.ts` — compact text tools for the model
 - `tools/investigate/` — headless investigation (`run-investigation-tool.ts`), UI-opening tool (`investigate-tool.ts`), session ops
+- `analysis/comparison.ts` + `datadog/comparison.ts` — target-vs-baseline comparison: `analysis/` is pure statistics (volume, pattern diff, facet attribution, onset detection), `datadog/` does the fetching. Sequential by design; up to 13 requests per `datadog_compare_windows` call (9 with defaults), ~5 when an investigation reuses its already-fetched target window
 - `report/` — self-contained HTML report export. Log content is untrusted: every dynamic value must pass through `escapeHtml`. `styles.ts`/`script.ts` are static inline CSS/JS strings — never interpolate user data into them, and the JS must not contain a literal `</script`.
 
 ### Config
-Server credentials come from env: `DD_API_KEY`, `DD_APP_KEY` (needs `logs_read_data` scope; `apm_read` / `events_read` for the trace and events tools — see `docs/datadog-permissions.md`), `DD_SITE` (e.g. `ap1.datadoghq.com` for Japan), optional `DD_LOGS_INDEXES`.
+Server credentials come from env: `DD_API_KEY`, `DD_APP_KEY` (needs `logs_read_data` scope; `apm_read` for the trace tools (`datadog_get_trace`, app-only `_get_trace`), `events_read` for events, `timeseries_query` for metrics, `monitors_read` for `datadog_list_monitors` — see `docs/datadog-permissions.md`), `DD_SITE` (e.g. `ap1.datadoghq.com` for Japan), optional `DD_LOGS_INDEXES`.
+
+Deferred security work is tracked in `docs/security-todo.md` (none of it is implemented).
 
 ## Style
 

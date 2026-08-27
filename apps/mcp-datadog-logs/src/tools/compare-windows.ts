@@ -53,8 +53,10 @@ export function registerCompareWindowsTool(server: McpServer): void {
           .string()
           .optional()
           .describe(
-            'How to derive the baseline window: "previous" (default, the window immediately before the target), ' +
-              'a shift back by the same duration ("1d", "1w", "4h"), or a time-math start ("now-1d")'
+            'How to derive the baseline window: "previous" (default, the window immediately before the target) ' +
+              'or a shift back by that much ("1d", "1w", "4h"). "now-1d" is accepted and means the same as "1d" — ' +
+              'the target window moved back, not a window starting at that instant. The baseline always has the ' +
+              "target's duration; use baselineFrom/baselineTo for an arbitrary window."
           ),
         baselineFrom: z
           .string()
