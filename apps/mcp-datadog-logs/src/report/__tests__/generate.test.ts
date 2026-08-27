@@ -1,4 +1,4 @@
-import type { InvestigationResult } from '@kajidog/investigation-shared'
+import type { ComparisonResult, InvestigationResult } from '@kajidog/investigation-shared'
 import { describe, expect, it } from 'vitest'
 import { escapeHtml, generateReport } from '../generate.js'
 import { renderTimelineSvg } from '../svg-timeline.js'
@@ -307,5 +307,359 @@ describe('renderTimelineSvg event markers', () => {
     })
     // Domain 10:00–10:10, event at 10:05 → x = padLeft + plotW / 2 = 44 + 948/2 = 518.
     expect(svg).toContain('x1="518.0"')
+  })
+})
+
+describe('baseline comparison section', () => {
+  function fixtureComparison(overrides: Partial<ComparisonResult> = {}): ComparisonResult {
+    return {
+      params: { query: 'service:payments', mode: 'shift', shift: '1d', facets: ['service'] },
+      target: {
+        fromMs: Date.parse('2026-07-06T09:10:00Z'),
+        toMs: Date.parse('2026-07-06T10:10:00Z'),
+        totalCount: 1234,
+        statusCounts: { error: 120, info: 1114 },
+        errorRate: 0.0972,
+      },
+      baseline: {
+        fromMs: Date.parse('2026-07-05T09:10:00Z'),
+        toMs: Date.parse('2026-07-05T10:10:00Z'),
+        totalCount: 600,
+        statusCounts: { error: 12, info: 588 },
+        errorRate: 0.02,
+      },
+      interval: '5m',
+      volume: {
+        total: { targetCount: 1234, baselineCount: 600, delta: 634, ratio: 2.0567 },
+        byStatus: [
+          { status: 'error', targetCount: 120, baselineCount: 12, delta: 108, ratio: 10 },
+          { status: 'info', targetCount: 1114, baselineCount: 588, delta: 526, ratio: 1.894 },
+        ],
+        errorRateDelta: 0.0772,
+      },
+      onset: {
+        time: '2026-07-06T09:35:00.000Z',
+        bucketIndex: 5,
+        errorRate: 0.18,
+        baselineMean: 0.02,
+        baselineStdev: 0.01,
+        threshold: 0.05,
+        sustainedBuckets: 3,
+        sigmas: 16,
+        precedingEvent: {
+          event: {
+            id: 'e9',
+            time: '2026-07-06T09:30:00.000Z',
+            kind: 'deploy',
+            title: 'payments v2.1',
+            source: 'github',
+          },
+          leadTimeMs: 300_000,
+        },
+      },
+      fetchedAt: '2026-07-06T10:10:00.000Z',
+      ...overrides,
+    }
+  }
+
+  function reportWith(overrides: Partial<ComparisonResult> = {}): string {
+    return generateReport({ ...fixtureResult(), comparison: fixtureComparison(overrides) }, new Map())
+  }
+
+  /** The comparison markup only — the inline CSS mentions the same class names. */
+  function comparisonSection(html: string): string {
+    const start = html.indexOf('<section class="comparison">')
+    if (start === -1) {
+      return ''
+    }
+    return html.slice(start, html.indexOf('</section>', start) + '</section>'.length)
+  }
+
+  /** The static report JS legitimately calls isNaN(); everything else must not say NaN. */
+  function withoutInlineScript(html: string): string {
+    return html.replace(/<script>[\s\S]*<\/script>/, '')
+  }
+
+  it('renders no comparison markup at all when the comparison is absent', () => {
+    const html = generateReport(fixtureResult(), new Map())
+    expect(html).not.toContain('Baseline comparison')
+    expect(html).not.toContain('<section class="comparison">')
+    expect(comparisonSection(html)).toBe('')
+  })
+
+  it('renders the windows, volume and a prominent error rate', () => {
+    const html = reportWith()
+    const section = comparisonSection(html)
+    expect(html).toContain('<h2>Baseline comparison</h2>')
+    expect(section).toContain('Baseline: shift 1d · Target 2026-07-06 09:10:00 → 2026-07-06 10:10:00')
+    expect(section).toContain('Baseline 2026-07-05 09:10:00 → 2026-07-05 10:10:00')
+    expect(section).toContain('buckets 5m')
+    // volume and error rate sit side by side: a surge is not an incident on its own
+    expect(section).toContain('1,234')
+    expect(section).toContain('vs 600 baseline (+634)')
+    expect(section).toContain('2.06x')
+    expect(section).toContain('Error rate')
+    expect(section).toContain('9.7%')
+    expect(section).toContain('vs 2.0% baseline')
+    expect(section).toContain('+7.7 pts')
+    // per-status deltas
+    expect(section).toContain('Volume by status')
+    expect(section).toContain('<span class="status-badge error">error</span>')
+    expect(section).toContain('10.0x')
+  })
+
+  it('renders the onset with its threshold arithmetic and preceding event', () => {
+    const section = comparisonSection(reportWith())
+    expect(section).toContain('Onset 2026-07-06 09:35:00')
+    expect(section).toContain('bucket 6/12')
+    expect(section).toContain('rate 18.0% vs baseline mean 2.0% ±1.0%')
+    expect(section).toContain('threshold 5.0%, 16.0σ')
+    expect(section).toContain('sustained 3 buckets')
+    expect(section).toContain('preceded by')
+    expect(section).toContain('payments v2.1')
+    expect(section).toContain('5m before onset')
+  })
+
+  it('escapes every log-derived value in the comparison (XSS)', () => {
+    const scriptPayload = '<script>alert(1)</script>'
+    const attrPayload = '"><img src=x onerror=alert(1)>'
+    const html = reportWith({
+      params: { query: scriptPayload, scope: attrPayload, mode: 'custom', facets: [scriptPayload] },
+      patterns: [
+        {
+          template: `${scriptPayload} failed for <*>`,
+          kind: 'spiking',
+          targetRatio: 0.4,
+          baselineRatio: 0.1,
+          targetSampleCount: 40,
+          baselineSampleCount: 10,
+          estimatedTargetCount: 400,
+          estimatedBaselineCount: 100,
+          lift: 4,
+          example: attrPayload,
+        },
+      ],
+      facets: [
+        {
+          facet: scriptPayload,
+          values: [
+            {
+              value: attrPayload,
+              targetCount: 90,
+              baselineCount: 3,
+              targetShare: 0.5,
+              baselineShare: 0.01,
+              excess: 84,
+              lift: 50,
+            },
+          ],
+          targetCovered: 180,
+          baselineCovered: 300,
+          targetTotal: 200,
+          baselineTotal: 320,
+        },
+      ],
+      onset: {
+        ...(fixtureComparison().onset ?? {
+          time: '2026-07-06T09:35:00.000Z',
+          bucketIndex: 5,
+          errorRate: 0.18,
+          baselineMean: 0.02,
+          baselineStdev: 0.01,
+          threshold: 0.05,
+          sustainedBuckets: 3,
+          sigmas: 16,
+        }),
+        precedingEvent: {
+          event: {
+            id: 'e9',
+            time: '2026-07-06T09:30:00.000Z',
+            kind: 'deploy',
+            title: scriptPayload,
+            source: attrPayload,
+          },
+          leadTimeMs: 300_000,
+        },
+      },
+      notices: [`Facet ${scriptPayload} was truncated`],
+    })
+    const section = comparisonSection(html)
+
+    expect(section).not.toContain(scriptPayload)
+    expect(section).not.toContain(attrPayload)
+    expect(section).not.toContain('<script>alert')
+    expect(section).not.toContain('<img src=x')
+    expect(section).not.toContain('onerror=alert(1)>')
+    expect(section).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(section).toContain('&quot;&gt;&lt;img src=x onerror=alert(1)&gt;')
+    // the whole document must not gain an executable payload either
+    expect(html).not.toContain('<script>alert(1)')
+    expect(html).not.toContain('<img src=x')
+  })
+
+  it('keeps a <*> pattern placeholder as escaped text', () => {
+    const section = comparisonSection(
+      reportWith({
+        patterns: [
+          {
+            template: 'timeout talking to <*> after <*>ms',
+            kind: 'new',
+            targetRatio: 0.25,
+            baselineRatio: 0,
+            targetSampleCount: 25,
+            baselineSampleCount: 0,
+            estimatedTargetCount: 300,
+            estimatedBaselineCount: 0,
+            lift: null,
+            example: 'timeout talking to db after 500ms',
+          },
+        ],
+      })
+    )
+    expect(section).toContain('timeout talking to &lt;*&gt; after &lt;*&gt;ms')
+    expect(section).not.toContain('<*>')
+  })
+
+  it('spells out null ratios and lifts instead of Infinity or NaN', () => {
+    const html = reportWith({
+      volume: {
+        total: { targetCount: 1234, baselineCount: 0, delta: 1234, ratio: null },
+        byStatus: [{ status: 'error', targetCount: 120, baselineCount: 0, delta: 120, ratio: null }],
+        errorRateDelta: 0.0972,
+      },
+      patterns: [
+        {
+          template: 'connection reset',
+          kind: 'spiking',
+          targetRatio: 0.3,
+          baselineRatio: 0,
+          targetSampleCount: 30,
+          baselineSampleCount: 0,
+          estimatedTargetCount: 360,
+          estimatedBaselineCount: 0,
+          lift: null,
+          example: 'connection reset',
+        },
+      ],
+      facets: [
+        {
+          facet: 'service',
+          values: [
+            {
+              value: 'payments',
+              targetCount: 90,
+              baselineCount: 0,
+              targetShare: 0.5,
+              baselineShare: 0,
+              excess: 90,
+              lift: null,
+            },
+          ],
+          targetCovered: 180,
+          baselineCovered: 0,
+          targetTotal: 200,
+          baselineTotal: 0,
+        },
+      ],
+    })
+    const section = comparisonSection(html)
+    expect(section).toContain('new (baseline 0)')
+    expect(section).not.toMatch(/Infinity|NaN/)
+    expect(section).not.toContain('null')
+    expect(section).not.toContain('undefined')
+    expect(withoutInlineScript(html)).not.toMatch(/Infinity|NaN/)
+  })
+
+  it('labels a truncated-baseline facet value "rare in baseline", never NEW', () => {
+    const section = comparisonSection(
+      reportWith({
+        facets: [
+          {
+            facet: 'service',
+            values: [
+              {
+                value: 'checkout',
+                targetCount: 90,
+                baselineCount: 0,
+                targetShare: 0.5,
+                baselineShare: 0,
+                excess: 90,
+                lift: null,
+                isNew: true,
+                baselineTruncated: true,
+              },
+            ],
+            targetCovered: 180,
+            baselineCovered: 300,
+            targetTotal: 200,
+            baselineTotal: 320,
+          },
+        ],
+      })
+    )
+    expect(section).toContain('rare in baseline')
+    expect(section).not.toContain('NEW')
+  })
+
+  it('renders empty pattern and facet arrays exactly like absent fields', () => {
+    const absent = comparisonSection(reportWith())
+    const empty = comparisonSection(reportWith({ patterns: [], facets: [], notices: [] }))
+    expect(empty).toBe(absent)
+    expect(empty).not.toContain('Changed message patterns')
+    expect(empty).not.toContain('attribution')
+  })
+
+  it('renders pattern diffs and facet attribution when present', () => {
+    const section = comparisonSection(
+      reportWith({
+        patterns: [
+          {
+            template: 'upstream timeout',
+            kind: 'spiking',
+            targetRatio: 0.4,
+            baselineRatio: 0.1,
+            targetSampleCount: 40,
+            baselineSampleCount: 10,
+            estimatedTargetCount: 494,
+            estimatedBaselineCount: 60,
+            lift: 4,
+            example: 'upstream timeout',
+          },
+        ],
+        facets: [
+          {
+            facet: 'service',
+            values: [
+              {
+                value: 'checkout',
+                targetCount: 90,
+                baselineCount: 10,
+                targetShare: 0.5,
+                baselineShare: 0.033,
+                excess: 70,
+                lift: 15,
+                isNew: true,
+              },
+            ],
+            targetCovered: 180,
+            baselineCovered: 300,
+            targetTotal: 200,
+            baselineTotal: 320,
+          },
+        ],
+      })
+    )
+    expect(section).toContain('Changed message patterns')
+    expect(section).toContain('<span class="diff-badge spiking">SPIKING</span>')
+    expect(section).toContain('~494')
+    expect(section).toContain('~60')
+    expect(section).toContain('4.00x')
+    expect(section).toContain('<code>upstream timeout</code>')
+    expect(section).toContain('service attribution')
+    expect(section).toContain('0.60x scale-up')
+    expect(section).toContain('checkout')
+    expect(section).toContain('+70')
+    expect(section).toContain('50.0% vs 3.3%')
+    expect(section).toContain('<span class="flag-badge new">NEW</span>')
   })
 })
