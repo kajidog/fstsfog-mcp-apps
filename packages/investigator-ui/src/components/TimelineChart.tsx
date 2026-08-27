@@ -1,7 +1,8 @@
 import type { EventMarker, EventMarkerKind, TimelineBucket } from '@kajidog/investigation-shared'
-import { useMemo } from 'react'
-import { Bar, BarChart, CartesianGrid, Cell, ReferenceLine, XAxis, YAxis } from 'recharts'
+import { useMemo, useState } from 'react'
+import { Bar, BarChart, CartesianGrid, Cell, ReferenceArea, ReferenceLine, XAxis, YAxis } from 'recharts'
 import { type ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
+import { computeRangeFromDrag, snapToBucket } from '@/lib/timeline'
 
 /** Bottom-to-top stack order; statuses outside this set fold into "other". */
 const STACK_ORDER = ['debug', 'info', 'warn', 'error'] as const
@@ -33,9 +34,13 @@ interface TimelineChartProps {
   timeline: TimelineBucket[]
   interval: string
   rangeMs: number
+  /** End of the investigated window (epoch ms) — caps a dragged range */
+  rangeEndMs: number
   /** Bucket time (ISO) currently selected as a table filter, if any */
   selectedBucket: string | null
   onBucketSelect: (time: string | null) => void
+  /** Drag across buckets: re-query the server for the dragged window (ISO 8601, zoned) */
+  onRangeSelect?: (fromIso: string, toIso: string) => void
   /** Events overlaid as vertical reference lines (snapped to the nearest bucket) */
   events?: EventMarker[]
   /** Detected onset time (ISO), drawn as its own reference line */
@@ -46,11 +51,17 @@ export function TimelineChart({
   timeline,
   interval,
   rangeMs,
+  rangeEndMs,
   selectedBucket,
   onBucketSelect,
+  onRangeSelect,
   events,
   onsetTime,
 }: TimelineChartProps) {
+  // Drag endpoints as bucket times. A press with no move (or a move back onto
+  // the pressed bucket) is a click, and keeps the existing single-bucket toggle.
+  const [dragStart, setDragStart] = useState<string | null>(null)
+  const [dragEnd, setDragEnd] = useState<string | null>(null)
   const { data, keys } = useMemo(() => {
     const present = new Set<string>()
     const rows = timeline.map((bucket) => {
@@ -112,11 +123,47 @@ export function TimelineChart({
         <BarChart
           data={data}
           margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
-          onClick={(state) => {
+          // No onClick handler: recharts fires it after onMouseUp, so wiring both
+          // would run the single-bucket toggle twice per click.
+          onMouseDown={(state) => {
             const label = state?.activeLabel
             if (typeof label === 'string') {
-              onBucketSelect(label === selectedBucket ? null : label)
+              setDragStart(label)
+              setDragEnd(null)
             }
+          }}
+          onMouseMove={(state) => {
+            if (dragStart === null) {
+              return
+            }
+            const label = state?.activeLabel
+            if (typeof label === 'string' && label !== dragEnd) {
+              setDragEnd(label)
+            }
+          }}
+          onMouseUp={() => {
+            const start = dragStart
+            const end = dragEnd
+            setDragStart(null)
+            setDragEnd(null)
+            if (start === null) {
+              return
+            }
+            if (end === null || end === start) {
+              onBucketSelect(start === selectedBucket ? null : start)
+              return
+            }
+            const range = computeRangeFromDrag(start, end, interval, rangeEndMs)
+            if (range) {
+              onRangeSelect?.(range.fromIso, range.toIso)
+            }
+          }}
+          // Leaving the plot cancels the drag; without this a mouseup outside
+          // would leave the preview stuck on screen. (Mouse only for now —
+          // touch drag is a follow-up.)
+          onMouseLeave={() => {
+            setDragStart(null)
+            setDragEnd(null)
           }}
         >
           <CartesianGrid vertical={false} />
@@ -141,6 +188,9 @@ export function TimelineChart({
             />
           ))}
           {onsetLine !== null && <ReferenceLine x={onsetLine} stroke={ONSET_COLOR} strokeWidth={2} />}
+          {dragStart !== null && dragEnd !== null && dragEnd !== dragStart && (
+            <ReferenceArea x1={dragStart} x2={dragEnd} fill="var(--status-info)" fillOpacity={0.15} strokeOpacity={0} />
+          )}
           {keys.map((key, i) => (
             <Bar
               key={key}
@@ -175,33 +225,11 @@ export function TimelineChart({
             異常の始まり
           </span>
         )}
-        <span className="text-[11px]">バーをクリックするとその時間帯だけ表に表示</span>
+        <span className="text-[11px]">バーをクリックするとその時間帯だけ表に表示 · ドラッグした範囲で再検索</span>
         <span className="ml-auto">{interval} ごと</span>
       </div>
     </div>
   )
-}
-
-/**
- * Nearest bucket time for an ISO timestamp, or null when it is unparseable or
- * falls outside the charted range (bucket ±interval).
- */
-function snapToBucket(buckets: Array<{ time: string; ms: number }>, iso: string): string | null {
-  if (buckets.length === 0) {
-    return null
-  }
-  const ms = Date.parse(iso)
-  const intervalMs = buckets.length > 1 ? buckets[1].ms - buckets[0].ms : 5 * 60_000
-  if (Number.isNaN(ms) || ms < buckets[0].ms || ms > buckets[buckets.length - 1].ms + intervalMs) {
-    return null
-  }
-  let nearest = buckets[0]
-  for (const bucket of buckets) {
-    if (Math.abs(bucket.ms - ms) < Math.abs(nearest.ms - ms)) {
-      nearest = bucket
-    }
-  }
-  return nearest.time
 }
 
 function formatTick(iso: string, withDate: boolean): string {

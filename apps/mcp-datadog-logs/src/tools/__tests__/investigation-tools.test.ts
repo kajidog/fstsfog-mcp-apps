@@ -3,10 +3,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { VIEW_UUID_PATTERN } from '@kajidog/investigation-shared'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { getDatadogClient } from '../../datadog/client.js'
 import { runInvestigation } from '../../datadog/investigation.js'
 import { createServer } from '../../server.js'
 import { clearSessions, getSession, setSession } from '../investigate/runtime.js'
-import { fixtureRawById, fixtureResult } from './fixtures.js'
+import { fixtureRawById, fixtureResult, fixtureRow } from './fixtures.js'
 
 vi.mock('../../datadog/client.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../datadog/client.js')>()),
@@ -24,6 +25,7 @@ vi.mock('node:child_process', () => ({
 }))
 
 const runInvestigationMock = vi.mocked(runInvestigation)
+const getDatadogClientMock = vi.mocked(getDatadogClient)
 const VIEW_UUID = '11111111-2222-3333-4444-555555555555'
 
 function getHandler(name: string) {
@@ -51,6 +53,7 @@ function resultText(res: { content: Array<{ type: string; text?: string }> }): s
 beforeEach(() => {
   clearSessions()
   runInvestigationMock.mockReset()
+  getDatadogClientMock.mockReturnValue({} as ReturnType<typeof getDatadogClient>)
   vi.unstubAllEnvs()
   // Fresh dir per test so sessions persisted by one test never leak into the
   // "missing session" cases of another.
@@ -287,5 +290,176 @@ describe('_export_report (app)', () => {
     expect(csv).toContain('log-2')
     expect(csv).toContain('log-3')
     expect(csv).not.toContain('log-1')
+  })
+})
+
+describe('_run_investigation cross-source params', () => {
+  it('clears metricsQueries when the UI sends an empty array instead of inheriting the stored ones', async () => {
+    const storedResult = fixtureResult({
+      params: {
+        query: 'service:payments status:error',
+        from: 'now-1h',
+        to: 'now',
+        metricsQueries: ['avg:system.cpu.user{*}'],
+      },
+    })
+    setSession(VIEW_UUID, {
+      result: storedResult,
+      rawById: fixtureRawById(storedResult),
+      createdAt: 1,
+      updatedAt: 1,
+    })
+    const result = fixtureResult()
+    runInvestigationMock.mockResolvedValueOnce({ result, rawById: fixtureRawById(result) })
+
+    const call = getHandler('_run_investigation')
+    await call({
+      viewUUID: VIEW_UUID,
+      query: 'service:payments status:error',
+      from: 'now-1h',
+      to: 'now',
+      metricsQueries: [],
+    })
+
+    // session-ops inherits with `?? existing`, and [] is not undefined — an
+    // empty array must clear the metrics rather than restore the stored ones.
+    expect(runInvestigationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ metricsQueries: [] })
+    )
+  })
+
+  it('inherits the stored metricsQueries when the field is omitted', async () => {
+    const storedResult = fixtureResult({
+      params: {
+        query: 'service:payments status:error',
+        from: 'now-1h',
+        to: 'now',
+        metricsQueries: ['avg:system.cpu.user{*}'],
+      },
+    })
+    setSession(VIEW_UUID, {
+      result: storedResult,
+      rawById: fixtureRawById(storedResult),
+      createdAt: 1,
+      updatedAt: 1,
+    })
+    const result = fixtureResult()
+    runInvestigationMock.mockResolvedValueOnce({ result, rawById: fixtureRawById(result) })
+
+    const call = getHandler('_run_investigation')
+    await call({ viewUUID: VIEW_UUID, query: 'service:payments status:error', from: 'now-1h', to: 'now' })
+
+    expect(runInvestigationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ metricsQueries: ['avg:system.cpu.user{*}'] })
+    )
+  })
+})
+
+describe('_get_trace (app)', () => {
+  const TRACE_ID = '4200000000000001'
+
+  function seedTraceSession(): void {
+    const result = fixtureResult({
+      rows: [fixtureRow('log-1', { traceId: TRACE_ID }), fixtureRow('log-2')],
+    })
+    setSession(VIEW_UUID, {
+      result,
+      rawById: fixtureRawById(result),
+      createdAt: 1,
+      updatedAt: 1,
+    })
+  }
+
+  it('returns notFound for an unknown viewUUID', async () => {
+    const call = getHandler('_get_trace')
+    const res = await call({ viewUUID: VIEW_UUID, traceId: TRACE_ID })
+    expect(JSON.parse(resultText(res))).toEqual({ notFound: true })
+  })
+
+  it('returns notFound for a traceId that is not on any stored row or candidate', async () => {
+    seedTraceSession()
+    const listTraceSpans = vi.fn()
+    getDatadogClientMock.mockReturnValue({ listTraceSpans } as unknown as ReturnType<typeof getDatadogClient>)
+
+    const call = getHandler('_get_trace')
+    const res = await call({ viewUUID: VIEW_UUID, traceId: 'not-in-this-session' })
+
+    expect(JSON.parse(resultText(res))).toEqual({ notFound: true })
+    expect(listTraceSpans).not.toHaveBeenCalled()
+  })
+
+  it('renders a trace carried by a stored row, bracketing the session range', async () => {
+    seedTraceSession()
+    const listTraceSpans = vi.fn().mockResolvedValue({
+      spans: [
+        {
+          id: 'span-1',
+          attributes: {
+            spanId: 'span-1',
+            service: 'payments',
+            resourceName: 'POST /charge',
+            type: 'web',
+            startTimestamp: '2026-07-06T10:00:00.000Z',
+            endTimestamp: '2026-07-06T10:00:01.000Z',
+          },
+        },
+      ],
+      truncated: false,
+    })
+    getDatadogClientMock.mockReturnValue({ listTraceSpans } as unknown as ReturnType<typeof getDatadogClient>)
+
+    const call = getHandler('_get_trace')
+    const res = await call({ viewUUID: VIEW_UUID, traceId: TRACE_ID })
+
+    const payload = JSON.parse(resultText(res))
+    expect(payload.traceId).toBe(TRACE_ID)
+    expect(payload.tree).toContain(`Trace ${TRACE_ID} — 1 spans`)
+    expect(payload.tree).toContain('payments POST /charge')
+    // 30 minutes of padding either side of the session's resolved window.
+    expect(listTraceSpans).toHaveBeenCalledWith({
+      traceId: TRACE_ID,
+      from: '2026-07-06T08:40:00.000Z',
+      to: '2026-07-06T10:40:00.000Z',
+      maxSpans: undefined,
+    })
+  })
+
+  it('accepts a traceId that only appears in traceCandidates', async () => {
+    const result = fixtureResult({
+      rows: [fixtureRow('log-1')],
+      traceCandidates: [
+        {
+          traceId: TRACE_ID,
+          count: 2,
+          errorCount: 1,
+          firstSeen: '2026-07-06T10:01:00.000Z',
+          services: ['payments'],
+        },
+      ],
+    })
+    setSession(VIEW_UUID, { result, rawById: fixtureRawById(result), createdAt: 1, updatedAt: 1 })
+    const listTraceSpans = vi.fn().mockResolvedValue({ spans: [], truncated: false })
+    getDatadogClientMock.mockReturnValue({ listTraceSpans } as unknown as ReturnType<typeof getDatadogClient>)
+
+    const call = getHandler('_get_trace')
+    const res = await call({ viewUUID: VIEW_UUID, traceId: TRACE_ID })
+
+    const payload = JSON.parse(resultText(res))
+    expect(payload.tree).toContain('No spans found')
+    expect(listTraceSpans).toHaveBeenCalled()
+  })
+
+  it('reports a missing apm_read scope instead of throwing', async () => {
+    seedTraceSession()
+    const listTraceSpans = vi.fn().mockRejectedValue(Object.assign(new Error('Forbidden'), { code: 403 }))
+    getDatadogClientMock.mockReturnValue({ listTraceSpans } as unknown as ReturnType<typeof getDatadogClient>)
+
+    const call = getHandler('_get_trace')
+    const res = await call({ viewUUID: VIEW_UUID, traceId: TRACE_ID })
+
+    expect(res.isError).toBe(true)
+    expect(resultText(res)).toContain('apm_read')
   })
 })

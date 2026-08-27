@@ -36,6 +36,12 @@ export interface RunInvestigationArgs {
   groupBy?: string
   limit?: number
   cursor?: string
+  /** Fetch Datadog events for the window; inherited from the session when omitted */
+  includeEvents?: boolean
+  /** Events search query; inherited from the session when omitted */
+  eventsQuery?: string
+  /** Metric queries to fetch alongside logs. Inherited when omitted; [] clears them. */
+  metricsQueries?: string[]
 }
 
 export async function fetchViewState(app: App, viewUUID: string): Promise<InvestigationResult | null> {
@@ -53,6 +59,40 @@ export async function fetchLogDetail(app: App, viewUUID: string, logId: string):
   const result = await app.callServerTool({ name: '_get_log_detail', arguments: { viewUUID, logId } })
   const parsed = parseJsonResult<Record<string, unknown>>(result, '_get_log_detail')
   return parsed && typeof parsed === 'object' && 'notFound' in parsed ? null : parsed
+}
+
+/** Rendered APM trace for one trace id, as `datadog_get_trace` would print it. */
+export interface TraceView {
+  traceId: string
+  tree: string
+}
+
+export interface FetchTraceArgs {
+  errorsOnly?: boolean
+  maxSpans?: number
+}
+
+/**
+ * The server derives the time bracket from the session and rejects trace ids
+ * that are not on a stored row, so only the viewUUID + id travel from here.
+ */
+export async function fetchTrace(
+  app: App,
+  viewUUID: string,
+  traceId: string,
+  args: FetchTraceArgs = {}
+): Promise<TraceView | null> {
+  const result = await app.callServerTool({
+    name: '_get_trace',
+    arguments: {
+      viewUUID,
+      traceId,
+      ...(args.errorsOnly !== undefined ? { errorsOnly: args.errorsOnly } : {}),
+      ...(args.maxSpans !== undefined ? { maxSpans: args.maxSpans } : {}),
+    },
+  })
+  const parsed = parseJsonResult<TraceView | { notFound: true }>(result, '_get_trace')
+  return 'notFound' in parsed ? null : parsed
 }
 
 export interface ExportReportArgs {

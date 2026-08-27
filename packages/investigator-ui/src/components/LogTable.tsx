@@ -1,9 +1,10 @@
-import type { LogRow } from '@kajidog/investigation-shared'
-import { Check, ChevronDown, ChevronRight, Copy, Loader2 } from 'lucide-react'
+import type { LogRow, TraceCandidate } from '@kajidog/investigation-shared'
+import { Check, ChevronDown, ChevronRight, CircleAlert, Copy, Loader2, Waypoints } from 'lucide-react'
 import { Fragment, type MouseEvent, type ReactNode, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import type { TraceView } from '@/hooks/toolClient'
 import { highlightText } from '@/lib/highlight'
 import { cn } from '@/lib/utils'
 
@@ -17,12 +18,21 @@ const STATUS_BADGE_CLASS: Record<string, string> = {
 const JSON_TOKEN_PATTERN =
   /("(?:\\u[\da-fA-F]{4}|\\[^u]|[^\\"])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\btrue\b|\bfalse\b|\bnull\b)/g
 
+const TRACE_UNAVAILABLE = 'このトレースは取得できませんでした。調査セッションが期限切れの可能性があります。'
+
+/** Loaded trace tree, or the reason it could not be rendered (missing apm_read scope, expired session, …). */
+type TraceState = { status: 'ready'; tree: string } | { status: 'error'; message: string }
+
 interface LogTableProps {
   rows: LogRow[]
   hasMore: boolean
   loadingMore: boolean
   onLoadMore: () => void
   fetchDetail: (logId: string) => Promise<unknown | null>
+  /** Fetch the rendered APM trace for a trace id; null when the session or id is unknown */
+  fetchTrace?: (traceId: string) => Promise<TraceView | null>
+  /** Trace ids seen across the fetched rows, shown as a pivot strip above the table */
+  traceCandidates?: TraceCandidate[]
   /** Message shown when rows is empty (e.g. differs when a local filter is active) */
   emptyMessage?: string
   /** Keyword-filter terms to emphasize inside the message column */
@@ -35,6 +45,8 @@ export function LogTable({
   loadingMore,
   onLoadMore,
   fetchDetail,
+  fetchTrace,
+  traceCandidates,
   emptyMessage,
   highlightTerms,
 }: LogTableProps) {
@@ -42,6 +54,11 @@ export function LogTable({
   const [details, setDetails] = useState<Record<string, unknown>>({})
   const [loadingId, setLoadingId] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  // Keyed by call site (a row id, or the candidate strip) so the same trace id
+  // opened from two rows does not render the panel under both.
+  const [expandedTrace, setExpandedTrace] = useState<{ key: string; traceId: string } | null>(null)
+  const [traces, setTraces] = useState<Record<string, TraceState>>({})
+  const [loadingTraceId, setLoadingTraceId] = useState<string | null>(null)
   const [copiedTraceId, setCopiedTraceId] = useState<string | null>(null)
 
   const toggle = async (row: LogRow) => {
@@ -63,6 +80,32 @@ export function LogTable({
     }
   }
 
+  const toggleTrace = async (key: string, traceId: string) => {
+    if (expandedTrace?.key === key) {
+      setExpandedTrace(null)
+      return
+    }
+    setExpandedTrace({ key, traceId })
+    if (traceId in traces) {
+      return
+    }
+    setLoadingTraceId(traceId)
+    try {
+      const trace = fetchTrace ? await fetchTrace(traceId) : null
+      setTraces((prev) => ({
+        ...prev,
+        [traceId]: trace ? { status: 'ready', tree: trace.tree } : { status: 'error', message: TRACE_UNAVAILABLE },
+      }))
+    } catch (err) {
+      setTraces((prev) => ({
+        ...prev,
+        [traceId]: { status: 'error', message: err instanceof Error ? err.message : String(err) },
+      }))
+    } finally {
+      setLoadingTraceId(null)
+    }
+  }
+
   const copyDetail = async (event: MouseEvent<HTMLButtonElement>, rowId: string, json: string) => {
     event.stopPropagation()
     const copied = await copyText(json)
@@ -75,26 +118,99 @@ export function LogTable({
     }, 1500)
   }
 
-  const copyTraceId = async (event: MouseEvent<HTMLButtonElement>, rowId: string, traceId: string) => {
+  const copyTraceId = async (event: MouseEvent<HTMLButtonElement>, traceId: string) => {
     event.stopPropagation()
     const copied = await copyText(traceId)
     if (!copied) {
       return
     }
-    setCopiedTraceId(rowId)
+    setCopiedTraceId(traceId)
     window.setTimeout(() => {
-      setCopiedTraceId((current) => (current === rowId ? null : current))
+      setCopiedTraceId((current) => (current === traceId ? null : current))
     }, 1500)
   }
 
+  const renderTracePanel = (traceId: string) => (
+    <div className="bg-muted/40">
+      <div className="flex items-center gap-1.5 border-b px-3 py-1">
+        <Waypoints className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+        <span className="truncate font-mono text-[11px] text-muted-foreground">trace:{traceId}</span>
+        <Button
+          type="button"
+          size="icon-xs"
+          variant="ghost"
+          aria-label="trace_id をコピー"
+          title={copiedTraceId === traceId ? 'コピーしました' : 'trace_id をコピー'}
+          onClick={(event) => void copyTraceId(event, traceId)}
+        >
+          {copiedTraceId === traceId ? <Check className="text-status-info" /> : <Copy />}
+        </Button>
+      </div>
+      {loadingTraceId === traceId ? (
+        <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin" /> トレースを読み込み中…
+        </div>
+      ) : traces[traceId]?.status === 'error' ? (
+        <div className="flex items-start gap-2 p-3 text-xs text-muted-foreground">
+          <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-status-warn" aria-hidden />
+          <span className="whitespace-pre-wrap">トレースを表示できません: {traces[traceId].message}</span>
+        </div>
+      ) : (
+        <pre className="max-h-72 overflow-auto p-3 text-[11px] leading-relaxed">
+          {traces[traceId]?.status === 'ready' ? traces[traceId].tree : ''}
+        </pre>
+      )}
+    </div>
+  )
+
+  const candidates = traceCandidates ?? []
+  const traceStrip =
+    candidates.length > 0 ? (
+      <div className="border-b px-2 py-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          <Waypoints className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+          <span className="text-muted-foreground">トレース候補:</span>
+          {candidates.map((candidate) => {
+            const key = `candidate:${candidate.traceId}`
+            return (
+              <button
+                key={candidate.traceId}
+                type="button"
+                onClick={() => void toggleTrace(key, candidate.traceId)}
+                title={candidate.sampleMessage ?? `trace:${candidate.traceId}`}
+                className={cn(
+                  'flex items-center gap-1.5 rounded-full border py-0.5 pl-2.5 pr-2 hover:bg-accent',
+                  expandedTrace?.key === key ? 'bg-accent' : 'bg-muted/40'
+                )}
+              >
+                <span className="max-w-32 truncate font-mono">{candidate.traceId}</span>
+                <span className="text-muted-foreground">
+                  {candidate.count} 件{candidate.errorCount > 0 ? ` / ${candidate.errorCount} error` : ''}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+        {expandedTrace?.key.startsWith('candidate:') && (
+          <div className="mt-1.5 overflow-hidden rounded-md border">{renderTracePanel(expandedTrace.traceId)}</div>
+        )}
+      </div>
+    ) : null
+
   if (rows.length === 0) {
     return (
-      <p className="py-6 text-center text-sm text-muted-foreground">{emptyMessage ?? 'この範囲にログはありません。'}</p>
+      <div>
+        {traceStrip}
+        <p className="py-6 text-center text-sm text-muted-foreground">
+          {emptyMessage ?? 'この範囲にログはありません。'}
+        </p>
+      </div>
     )
   }
 
   return (
     <div>
+      {traceStrip}
       <Table className="table-fixed">
         <TableHeader>
           <TableRow>
@@ -109,6 +225,7 @@ export function LogTable({
           {rows.map((row) => {
             const detailJson = JSON.stringify(details[row.id] ?? row, null, 2)
             const copied = copiedId === row.id
+            const traceOpen = expandedTrace?.key === row.id
 
             return (
               <Fragment key={row.id}>
@@ -143,15 +260,17 @@ export function LogTable({
                     {row.traceId && (
                       <button
                         type="button"
-                        onClick={(event) => void copyTraceId(event, row.id, row.traceId ?? '')}
-                        title={copiedTraceId === row.id ? 'コピーしました' : `trace_id をコピー: ${row.traceId}`}
-                        className="mr-1.5 inline-flex max-w-32 items-center gap-1 truncate rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground hover:bg-accent"
-                      >
-                        {copiedTraceId === row.id ? (
-                          <Check className="size-2.5 shrink-0 text-status-info" />
-                        ) : (
-                          <Copy className="size-2.5 shrink-0" />
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void toggleTrace(row.id, row.traceId ?? '')
+                        }}
+                        title={`トレースを表示: ${row.traceId}`}
+                        className={cn(
+                          'mr-1.5 inline-flex max-w-32 items-center gap-1 truncate rounded px-1 font-mono text-[10px] text-muted-foreground hover:bg-accent',
+                          traceOpen ? 'bg-accent' : 'bg-muted'
                         )}
+                      >
+                        <Waypoints className="size-2.5 shrink-0" aria-hidden />
                         <span className="truncate">trace:{row.traceId}</span>
                       </button>
                     )}
@@ -183,6 +302,13 @@ export function LogTable({
                           </pre>
                         </div>
                       )}
+                    </TableCell>
+                  </TableRow>
+                )}
+                {traceOpen && (
+                  <TableRow className="hover:bg-transparent">
+                    <TableCell colSpan={5} className="p-0">
+                      {renderTracePanel(expandedTrace.traceId)}
                     </TableCell>
                   </TableRow>
                 )}

@@ -52,7 +52,14 @@ function mockResult(query: string, from: string, to: string): InvestigationResul
   }))
   const events = mockEvents(now, buckets, stepMs)
   return {
-    params: { query, from, to },
+    // Seeded so the metrics editor starts populated in dev; these are the
+    // queries mockMetrics() pretends to have run.
+    params: {
+      query,
+      from,
+      to,
+      metricsQueries: ['avg:system.cpu.user{service:payments}', 'avg:trace.express.request.duration{service:payments}'],
+    },
     totalCount: 1234,
     timeline,
     interval: '5m',
@@ -420,6 +427,19 @@ function mockPatterns(rows: LogRow[]): LogPattern[] {
     }))
 }
 
+/** Same shape as the server's formatTrace output, so the dev <pre> matches production. */
+function mockTraceTree(traceId: string): string {
+  return [
+    `Trace ${traceId} — 9 spans (2 errors), duration 30.1s, start ${new Date().toISOString()}`,
+    'checkout POST /api/v1/charge [web] +0ms 30.05s [ERROR]',
+    '  payments charge.authorize [custom] +12ms 30.01s [ERROR]',
+    '    payments SELECT orders [sql] +18ms 2.40s',
+    '    payments redis GET session [cache] +2.43s <1ms x4 (total 3ms)',
+    '    upstream-gateway POST /v2/authorize [http] +2.44s 27.56s',
+    '  auth verify_token [custom] +3ms 8ms',
+  ].join('\n')
+}
+
 /**
  * DEV-only stand-in for the MCP Apps bridge so `vite dev` renders in a plain
  * browser without a host or Datadog credentials.
@@ -433,10 +453,23 @@ export function createMockApp(): App {
         case '_get_view_state':
           return json(current)
         case '_run_investigation': {
-          current = mockResult(args.query, args.from, args.to)
-          if (args.cursor) {
-            current = { ...current, rows: [...current.rows] }
+          const next = mockResult(args.query, args.from, args.to)
+          // Mirror the server's cross-source handling (session-ops.ts): an
+          // omitted field inherits the stored one, and [] genuinely clears.
+          const metricsQueries: string[] | undefined = args.metricsQueries ?? current.params.metricsQueries
+          const includeEvents: boolean | undefined = args.includeEvents ?? current.params.includeEvents
+          const eventsQuery: string | undefined = args.eventsQuery ?? current.params.eventsQuery
+          next.params = {
+            ...next.params,
+            ...(metricsQueries !== undefined ? { metricsQueries } : {}),
+            ...(includeEvents !== undefined ? { includeEvents } : {}),
+            ...(eventsQuery !== undefined ? { eventsQuery } : {}),
           }
+          if (metricsQueries !== undefined && metricsQueries.length === 0) {
+            // No queries, no series — the same shape the server returns.
+            next.metrics = []
+          }
+          current = args.cursor ? { ...next, rows: [...next.rows] } : next
           return json(current)
         }
         case '_get_log_detail':
@@ -451,6 +484,12 @@ export function createMockApp(): App {
               tags: ['env:prod', 'team:core'],
             },
           })
+        case '_get_trace': {
+          const known =
+            current.rows.some((row) => row.traceId === args.traceId) ||
+            (current.traceCandidates ?? []).some((candidate) => candidate.traceId === args.traceId)
+          return known ? json({ traceId: args.traceId, tree: mockTraceTree(args.traceId) }) : json({ notFound: true })
+        }
         case '_export_report': {
           const format = args.format ?? 'html'
           return json({

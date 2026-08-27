@@ -34,6 +34,7 @@ describe('createServer tool registration', () => {
         '_get_view_state',
         '_run_investigation',
         '_get_log_detail',
+        '_get_trace',
         '_export_report',
       ])
     )
@@ -41,7 +42,7 @@ describe('createServer tool registration', () => {
     // investigate tool opens the UI
     expect(tools.datadog_investigate_logs._meta?.ui?.resourceUri).toBe('ui://datadog-logs/investigator.html')
     // app-only tools are hidden from the model
-    for (const name of ['_get_view_state', '_run_investigation', '_get_log_detail', '_export_report']) {
+    for (const name of ['_get_view_state', '_run_investigation', '_get_log_detail', '_get_trace', '_export_report']) {
       expect(tools[name]._meta?.ui?.visibility, name).toEqual(['app'])
     }
     // model-facing search tools do not open the UI

@@ -1,4 +1,3 @@
-import type { TimelineBucket } from '@kajidog/investigation-shared'
 import type { App } from '@modelcontextprotocol/ext-apps'
 import { useApp } from '@modelcontextprotocol/ext-apps/react'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
@@ -9,10 +8,11 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Input } from '@/components/ui/input'
 import { createMockApp, MOCK_VIEW_UUID } from '@/hooks/devMockApp'
-import { exportReport, fetchLogDetail } from '@/hooks/toolClient'
+import { exportReport, fetchLogDetail, fetchTrace } from '@/hooks/toolClient'
 import { useDisplayMode } from '@/hooks/useDisplayMode'
 import { useInvestigation } from '@/hooks/useInvestigation'
 import { useMcpResizeNotifications } from '@/hooks/useMcpResizeNotifications'
+import { type BucketRange, resolveBucketRange } from '@/lib/timeline'
 import { cn } from '@/lib/utils'
 import { ComparisonPanel } from './ComparisonPanel'
 import { EventList } from './EventList'
@@ -20,6 +20,7 @@ import { FACET_META, FacetSidebar, facetKey } from './FacetSidebar'
 import { LogTable } from './LogTable'
 import { Markdown } from './Markdown'
 import { MetricsPanel } from './MetricsPanel'
+import { MetricsQueryEditor } from './MetricsQueryEditor'
 import { PatternList } from './PatternList'
 import { QueryBar } from './QueryBar'
 import { TimelineChart } from './TimelineChart'
@@ -130,6 +131,7 @@ export function Investigator() {
     result?.patterns?.length ?? 0,
     result?.events?.length ?? 0,
     result?.metrics?.length ?? 0,
+    result?.traceCandidates?.length ?? 0,
     result?.notices?.length ?? 0,
     result?.comparison?.fetchedAt ?? '',
   ].join(':')
@@ -158,6 +160,18 @@ export function Investigator() {
     setExportPath(null)
     setExportOpenError(null)
     void run({ query: nextQuery, from, to, groupBy: result?.params.groupBy })
+  }
+
+  // Timeline drag: narrow the investigated window itself (a server re-query),
+  // not just the client-side bucket filter. The ISO strings are passed to run()
+  // explicitly because setFrom/setTo have not applied yet on this render.
+  const handleRangeSelect = (fromIso: string, toIso: string) => {
+    setFrom(fromIso)
+    setTo(toIso)
+    setSelectedBucket(null)
+    setExportPath(null)
+    setExportOpenError(null)
+    void run({ query, from: fromIso, to: toIso, groupBy: result?.params.groupBy })
   }
 
   // facet:value tokens currently present in the query, shown as removable chips.
@@ -386,8 +400,10 @@ export function Investigator() {
                 timeline={result.timeline}
                 interval={result.interval}
                 rangeMs={result.resolvedRange.toMs - result.resolvedRange.fromMs}
+                rangeEndMs={result.resolvedRange.toMs}
                 selectedBucket={effectiveBucket}
                 onBucketSelect={setSelectedBucket}
+                onRangeSelect={handleRangeSelect}
                 events={result.events}
                 onsetTime={result.comparison?.onset?.time}
               />
@@ -395,6 +411,15 @@ export function Investigator() {
           </Card>
           <EventList events={result.events ?? []} timeline={result.timeline} onSelectBucket={setSelectedBucket} />
           <MetricsPanel metrics={result.metrics ?? []} />
+          <MetricsQueryEditor
+            queries={result.params.metricsQueries ?? []}
+            running={running}
+            onApply={(metricsQueries) => {
+              setExportPath(null)
+              setExportOpenError(null)
+              void run({ query, from, to, groupBy: result.params.groupBy, metricsQueries })
+            }}
+          />
           <PatternList
             patterns={result.patterns ?? []}
             analyzedCount={result.rows.length}
@@ -462,6 +487,7 @@ export function Investigator() {
               <LogTable
                 rows={filteredRows}
                 highlightTerms={keywordTerms}
+                traceCandidates={result.traceCandidates}
                 hasMore={Boolean(result.nextCursor)}
                 loadingMore={loadingMore}
                 onLoadMore={() => void loadMore()}
@@ -475,6 +501,14 @@ export function Investigator() {
                     return null
                   }
                   return fetchLogDetail(app, viewUUID, logId)
+                }}
+                fetchTrace={async (traceId) => {
+                  const app = appRef.current
+                  const viewUUID = viewUUIDRef.current
+                  if (!app || !viewUUID) {
+                    return null
+                  }
+                  return fetchTrace(app, viewUUID, traceId)
                 }}
               />
             </CardContent>
@@ -531,40 +565,6 @@ function unquoteValue(raw: string): string {
 
 function removeRange(query: string, start: number, end: number): string {
   return (query.slice(0, start) + query.slice(end)).replace(/\s+/g, ' ').trim()
-}
-
-interface BucketRange {
-  startMs: number
-  endMs: number
-}
-
-function intervalToMs(interval: string): number {
-  const match = /^(\d+)\s*(s|m|h|d)$/.exec(interval.trim())
-  if (!match) {
-    return 0
-  }
-  const unitMs = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2] as 's' | 'm' | 'h' | 'd']
-  return Number(match[1]) * unitMs
-}
-
-function resolveBucketRange(
-  timeline: TimelineBucket[],
-  bucketTime: string,
-  interval: string,
-  rangeEndMs: number
-): BucketRange | null {
-  const startMs = Date.parse(bucketTime)
-  if (Number.isNaN(startMs)) {
-    return null
-  }
-  const intervalMs = intervalToMs(interval)
-  if (intervalMs > 0) {
-    return { startMs, endMs: startMs + intervalMs }
-  }
-  // Unknown interval format: fall back to the next bucket's start (or the range end).
-  const index = timeline.findIndex((b) => b.time === bucketTime)
-  const nextMs = index >= 0 && index + 1 < timeline.length ? Date.parse(timeline[index + 1].time) : NaN
-  return { startMs, endMs: Number.isNaN(nextMs) ? rangeEndMs : nextMs }
 }
 
 function formatBucketRange({ startMs, endMs }: BucketRange): string {
