@@ -14,6 +14,7 @@ import { useDisplayMode } from '@/hooks/useDisplayMode'
 import { useInvestigation } from '@/hooks/useInvestigation'
 import { useMcpResizeNotifications } from '@/hooks/useMcpResizeNotifications'
 import { cn } from '@/lib/utils'
+import { ComparisonPanel } from './ComparisonPanel'
 import { EventList } from './EventList'
 import { FACET_META, FacetSidebar, facetKey } from './FacetSidebar'
 import { LogTable } from './LogTable'
@@ -130,6 +131,7 @@ export function Investigator() {
     result?.events?.length ?? 0,
     result?.metrics?.length ?? 0,
     result?.notices?.length ?? 0,
+    result?.comparison?.fetchedAt ?? '',
   ].join(':')
   useMcpResizeNotifications(isStandaloneDev ? null : connectedApp, resizeTrigger)
 
@@ -363,6 +365,8 @@ export function Investigator() {
         {result.params.title ? ` · ${result.params.title}` : ''}
       </div>
 
+      <ComparisonPanel comparison={result.comparison} />
+
       <div
         className={cn(
           'grid grid-cols-1 gap-3 md:grid-cols-[13rem_1fr]',
@@ -385,6 +389,7 @@ export function Investigator() {
                 selectedBucket={effectiveBucket}
                 onBucketSelect={setSelectedBucket}
                 events={result.events}
+                onsetTime={result.comparison?.onset?.time}
               />
             </CardContent>
           </Card>

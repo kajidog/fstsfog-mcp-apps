@@ -20,6 +20,9 @@ const EVENT_COLOR: Record<EventMarkerKind, string> = {
   other: 'var(--event-other)',
 }
 
+/** The onset marker: solid, and the only line drawn in the error colour. */
+const ONSET_COLOR = 'var(--status-error)'
+
 const EVENT_KIND_LABEL: Record<EventMarkerKind, string> = {
   deploy: 'デプロイ',
   alert: 'アラート',
@@ -35,6 +38,8 @@ interface TimelineChartProps {
   onBucketSelect: (time: string | null) => void
   /** Events overlaid as vertical reference lines (snapped to the nearest bucket) */
   events?: EventMarker[]
+  /** Detected onset time (ISO), drawn as its own reference line */
+  onsetTime?: string
 }
 
 export function TimelineChart({
@@ -44,6 +49,7 @@ export function TimelineChart({
   selectedBucket,
   onBucketSelect,
   events,
+  onsetTime,
 }: TimelineChartProps) {
   const { data, keys } = useMemo(() => {
     const present = new Set<string>()
@@ -63,33 +69,32 @@ export function TimelineChart({
   }, [timeline])
 
   // The XAxis is categorical, so ReferenceLine x must be an exact bucket time:
-  // each event snaps to its nearest bucket (positions are bucket ±interval).
+  // each marker snaps to its nearest bucket (positions are bucket ±interval).
+  const buckets = useMemo(
+    () => timeline.map((b) => ({ time: b.time, ms: Date.parse(b.time) })).filter((b) => !Number.isNaN(b.ms)),
+    [timeline]
+  )
+
   const eventLines = useMemo(() => {
     const list = events ?? []
-    const buckets = timeline.map((b) => ({ time: b.time, ms: Date.parse(b.time) })).filter((b) => !Number.isNaN(b.ms))
     if (list.length === 0 || buckets.length === 0) {
       return []
     }
-    const intervalMs = buckets.length > 1 ? buckets[1].ms - buckets[0].ms : 5 * 60_000
-    const firstMs = buckets[0].ms
-    const lastMs = buckets[buckets.length - 1].ms + intervalMs
     const lines: Array<{ key: string; x: string; kind: EventMarkerKind }> = []
     for (const event of list) {
-      const eventMs = Date.parse(event.time)
-      if (Number.isNaN(eventMs) || eventMs < firstMs || eventMs > lastMs) {
+      const x = snapToBucket(buckets, event.time)
+      if (x === null) {
         continue
       }
-      let nearest = buckets[0]
-      for (const bucket of buckets) {
-        if (Math.abs(bucket.ms - eventMs) < Math.abs(nearest.ms - eventMs)) {
-          nearest = bucket
-        }
-      }
-      lines.push({ key: event.id || `${event.time}:${event.kind}`, x: nearest.time, kind: event.kind })
+      lines.push({ key: event.id || `${event.time}:${event.kind}`, x, kind: event.kind })
     }
     return lines
-  }, [events, timeline])
+  }, [events, buckets])
   const eventKinds = useMemo(() => [...new Set(eventLines.map((line) => line.kind))], [eventLines])
+
+  // The onset is the bucket where the error rate starts departing from the
+  // baseline: one line, distinct from the dashed event markers.
+  const onsetLine = useMemo(() => (onsetTime ? snapToBucket(buckets, onsetTime) : null), [onsetTime, buckets])
 
   const withDate = rangeMs > 86_400_000
 
@@ -135,6 +140,7 @@ export function TimelineChart({
               strokeWidth={1.5}
             />
           ))}
+          {onsetLine !== null && <ReferenceLine x={onsetLine} stroke={ONSET_COLOR} strokeWidth={2} />}
           {keys.map((key, i) => (
             <Bar
               key={key}
@@ -163,11 +169,39 @@ export function TimelineChart({
             {EVENT_KIND_LABEL[kind]}
           </span>
         ))}
+        {onsetLine !== null && (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2.5 w-0.5" style={{ background: ONSET_COLOR }} />
+            異常の始まり
+          </span>
+        )}
         <span className="text-[11px]">バーをクリックするとその時間帯だけ表に表示</span>
         <span className="ml-auto">{interval} ごと</span>
       </div>
     </div>
   )
+}
+
+/**
+ * Nearest bucket time for an ISO timestamp, or null when it is unparseable or
+ * falls outside the charted range (bucket ±interval).
+ */
+function snapToBucket(buckets: Array<{ time: string; ms: number }>, iso: string): string | null {
+  if (buckets.length === 0) {
+    return null
+  }
+  const ms = Date.parse(iso)
+  const intervalMs = buckets.length > 1 ? buckets[1].ms - buckets[0].ms : 5 * 60_000
+  if (Number.isNaN(ms) || ms < buckets[0].ms || ms > buckets[buckets.length - 1].ms + intervalMs) {
+    return null
+  }
+  let nearest = buckets[0]
+  for (const bucket of buckets) {
+    if (Math.abs(bucket.ms - ms) < Math.abs(nearest.ms - ms)) {
+      nearest = bucket
+    }
+  }
+  return nearest.time
 }
 
 function formatTick(iso: string, withDate: boolean): string {
