@@ -111,6 +111,86 @@ describe('datadog_run_investigation', () => {
     expect(runInvestigationMock).not.toHaveBeenCalled()
   })
 
+  it('passes the baseline params through to the investigation', async () => {
+    const result = fixtureResult()
+    runInvestigationMock.mockResolvedValueOnce({ result, rawById: fixtureRawById(result) })
+
+    const call = getHandler('datadog_run_investigation')
+    await call({
+      query: 'status:error',
+      from: 'now-1h',
+      to: 'now',
+      sampleRows: 0,
+      baseline: '1d',
+      baselineFrom: 'now-2d',
+      baselineTo: 'now-1d',
+    })
+
+    expect(runInvestigationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ baseline: '1d', baselineFrom: 'now-2d', baselineTo: 'now-1d' })
+    )
+  })
+
+  it('inherits the baseline params from the stored session when a re-run omits them', async () => {
+    const storedResult = fixtureResult({
+      params: {
+        query: 'service:payments status:error',
+        from: 'now-1h',
+        to: 'now',
+        baseline: '1w',
+        baselineFrom: 'now-8d',
+        baselineTo: 'now-7d',
+      },
+    })
+    setSession(VIEW_UUID, {
+      result: storedResult,
+      rawById: fixtureRawById(storedResult),
+      createdAt: 1,
+      updatedAt: 1,
+    })
+    const result = fixtureResult()
+    runInvestigationMock.mockResolvedValueOnce({ result, rawById: fixtureRawById(result) })
+
+    const call = getHandler('datadog_run_investigation')
+    await call({ viewUUID: VIEW_UUID, query: 'service:payments', from: 'now-2h', to: 'now', sampleRows: 0 })
+
+    expect(runInvestigationMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ baseline: '1w', baselineFrom: 'now-8d', baselineTo: 'now-7d' })
+    )
+  })
+
+  it('carries a previous comparison forward on a cursor continuation', async () => {
+    const comparison = {
+      params: { query: 'service:payments status:error', mode: 'previous' as const, facets: ['service'] },
+      target: { fromMs: 1, toMs: 2, totalCount: 10, statusCounts: { error: 5 }, errorRate: 0.5 },
+      baseline: { fromMs: 0, toMs: 1, totalCount: 4, statusCounts: { error: 1 }, errorRate: 0.25 },
+      interval: '5m',
+      volume: {
+        total: { targetCount: 10, baselineCount: 4, delta: 6, ratio: 2.5 },
+        byStatus: [],
+        errorRateDelta: 0.25,
+      },
+      fetchedAt: '2026-07-06T10:10:00.000Z',
+    }
+    const storedResult = fixtureResult({ comparison })
+    setSession(VIEW_UUID, {
+      result: storedResult,
+      rawById: fixtureRawById(storedResult),
+      createdAt: 1,
+      updatedAt: 1,
+    })
+    // A load-more page never re-runs the comparison, so its result carries none.
+    const page = fixtureResult()
+    runInvestigationMock.mockResolvedValueOnce({ result: page, rawById: fixtureRawById(page) })
+
+    const call = getHandler('datadog_run_investigation')
+    await call({ viewUUID: VIEW_UUID, cursor: 'page-2' })
+
+    expect(getSession(VIEW_UUID)?.result.comparison).toEqual(comparison)
+  })
+
   it('does not inject the new-investigation defaults into a cursor continuation', async () => {
     const storedResult = fixtureResult({
       params: { query: 'service:payments status:error', from: 'now-7d', to: 'now' },

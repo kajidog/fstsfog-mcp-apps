@@ -348,6 +348,14 @@ describe('runComparison', () => {
       expect('facets' in result).toBe(false)
       expect(result.notices?.some((n) => n.includes('not part of the reused target window'))).toBe(true)
     })
+
+    it('treats an empty reused sample as no sample rather than diffing against nothing', async () => {
+      // Otherwise every baseline template comes back "gone", which reads as a
+      // resolved incident instead of as a target window with no rows fetched.
+      const result = await run({ precomputedTarget: precomputed({ rows: [] }) })
+      expect('patterns' in result).toBe(false)
+      expect(client.calls).not.toContain('search@baseline')
+    })
   })
 
   describe('degradation', () => {

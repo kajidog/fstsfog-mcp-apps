@@ -249,7 +249,10 @@ function reusePrecomputedTarget(
     facets,
     rows: includePatterns ? precomputed.rows : [],
     rowsTruncated: includePatterns && precomputed.rowsTruncated,
-    rowsFetched: includePatterns,
+    // An empty reused sample is not a fetched sample. Reporting it as one would
+    // diff nothing against the baseline's templates and label every one of them
+    // "gone", which reads as a resolved incident rather than as missing data.
+    rowsFetched: includePatterns && precomputed.rows.length > 0,
     ...(includeEvents && precomputed.events !== undefined ? { events: precomputed.events } : {}),
   }
 }
@@ -322,7 +325,9 @@ export async function runComparison(
     // Only facets the target actually has can be attributed; fetching the others
     // would spend a request on a comparison that cannot be made.
     facets: facetNames.filter((facet) => targetWindow.facets.has(facet)),
-    includePatterns,
+    // Same reasoning for the sample: with no target rows there is nothing to
+    // diff the baseline's templates against, so the request would buy nothing.
+    includePatterns: includePatterns && targetWindow.rowsFetched,
     // Events annotate the onset, which sits in the target window by construction.
     includeEvents: false,
     limit,

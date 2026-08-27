@@ -60,6 +60,21 @@ export function registerInvestigateAppTools(server: McpServer): void {
           .max(4)
           .optional()
           .describe('Metric queries to fetch alongside logs (inherited when omitted)'),
+        baseline: z
+          .string()
+          .optional()
+          .describe(
+            'Baseline window to compare against ("previous", a shift like "1d"/"1w", or a time-math start); ' +
+              'costs ~5 extra Datadog requests (inherited when omitted)'
+          ),
+        baselineFrom: z
+          .string()
+          .optional()
+          .describe('Explicit baseline start; overrides "baseline". Same ~5 extra requests (inherited when omitted)'),
+        baselineTo: z
+          .string()
+          .optional()
+          .describe('Explicit baseline end; honoured on its own. Same ~5 extra requests (inherited when omitted)'),
       },
       _meta: appOnlyMeta,
     },
@@ -74,6 +89,9 @@ export function registerInvestigateAppTools(server: McpServer): void {
       includeEvents,
       eventsQuery,
       metricsQueries,
+      baseline,
+      baselineFrom,
+      baselineTo,
     }: {
       viewUUID: string
       query: string
@@ -85,12 +103,28 @@ export function registerInvestigateAppTools(server: McpServer): void {
       includeEvents?: boolean
       eventsQuery?: string
       metricsQueries?: string[]
+      baseline?: string
+      baselineFrom?: string
+      baselineTo?: string
     }): Promise<CallToolResult> => {
       try {
         // No findings arg: existing findings are preserved across UI re-runs.
         const { session } = await runAndStoreInvestigation({
           viewUUID,
-          params: { query, from, to, groupBy, limit, cursor, includeEvents, eventsQuery, metricsQueries },
+          params: {
+            query,
+            from,
+            to,
+            groupBy,
+            limit,
+            cursor,
+            includeEvents,
+            eventsQuery,
+            metricsQueries,
+            baseline,
+            baselineFrom,
+            baselineTo,
+          },
         })
         return jsonResult(sessionResult(session))
       } catch (error) {

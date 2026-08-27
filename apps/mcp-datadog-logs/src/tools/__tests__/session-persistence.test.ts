@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { ComparisonResult } from '@kajidog/investigation-shared'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { InvestigationSession } from '../investigate/runtime.js'
 import { clearSessions, getSession, setSession } from '../investigate/runtime.js'
@@ -9,8 +10,29 @@ import { fixtureRawById, fixtureResult } from './fixtures.js'
 const VIEW_UUID = '11111111-2222-3333-4444-555555555555'
 const OTHER_UUID = '99999999-8888-7777-6666-555555555555'
 
-function fixtureSession(): InvestigationSession {
-  const result = fixtureResult()
+function fixtureComparison(): ComparisonResult {
+  const window = (fromMs: number, totalCount: number, errorRate: number) => ({
+    fromMs,
+    toMs: fromMs + 3_600_000,
+    totalCount,
+    statusCounts: { error: Math.round(totalCount * errorRate) },
+    errorRate,
+  })
+  return {
+    params: { query: 'service:payments status:error', mode: 'previous', facets: ['service'] },
+    target: window(Date.parse('2026-07-06T09:10:00Z'), 1234, 0.1),
+    baseline: window(Date.parse('2026-07-06T08:10:00Z'), 600, 0.02),
+    interval: '5m',
+    volume: {
+      total: { targetCount: 1234, baselineCount: 600, delta: 634, ratio: 2.06 },
+      byStatus: [{ status: 'error', targetCount: 123, baselineCount: 12, delta: 111, ratio: 10.25 }],
+      errorRateDelta: 0.08,
+    },
+    fetchedAt: '2026-07-06T10:10:00.000Z',
+  }
+}
+
+function fixtureSession(result = fixtureResult()): InvestigationSession {
   return {
     result,
     rawById: fixtureRawById(result),
@@ -47,12 +69,24 @@ describe('session persistence', () => {
     expect(restored?.rawById.get('log-2')).toEqual({ id: 'log-2' })
   })
 
+  it('round-trips a session carrying a baseline comparison', () => {
+    const comparison = fixtureComparison()
+    setSession(VIEW_UUID, fixtureSession(fixtureResult({ comparison })))
+    clearSessions()
+
+    const restored = getSession(VIEW_UUID)
+    expect(restored?.result.comparison).toEqual(comparison)
+  })
+
   it('loads version-1 files written before the cross-source fields existed', () => {
-    setSession(VIEW_UUID, fixtureSession())
+    setSession(VIEW_UUID, fixtureSession(fixtureResult({ comparison: fixtureComparison() })))
     const path = join(dir, `${VIEW_UUID}.json`)
     const file = JSON.parse(readFileSync(path, 'utf-8'))
+    // The schema version does not move for optional fields: a file written
+    // before they existed is still version 1 and must load unchanged.
+    expect(file.version).toBe(1)
     // Simulate a pre-cross-source file: strip the optional fields entirely.
-    const { events: _e, metrics: _m, traceCandidates: _t, notices: _n, ...legacyResult } = file.result
+    const { events: _e, metrics: _m, traceCandidates: _t, notices: _n, comparison: _c, ...legacyResult } = file.result
     writeFileSync(path, JSON.stringify({ ...file, result: legacyResult }), 'utf-8')
     clearSessions()
 
@@ -62,6 +96,8 @@ describe('session persistence', () => {
     expect(restored?.result.metrics).toBeUndefined()
     expect(restored?.result.traceCandidates).toBeUndefined()
     expect(restored?.result.notices).toBeUndefined()
+    // The key itself must be absent, not present-and-undefined.
+    expect('comparison' in (restored?.result ?? {})).toBe(false)
     expect(restored?.result.rows.map((r) => r.id)).toEqual(['log-1', 'log-2', 'log-3', 'log-4'])
   })
 
