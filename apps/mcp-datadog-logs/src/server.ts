@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { registerAggregateLogsTool } from './tools/aggregate-logs.js'
+import { registerCompareWindowsTool } from './tools/compare-windows.js'
 import { registerGetTraceTool } from './tools/get-trace.js'
 import { registerInvestigateAppTools } from './tools/investigate/app-tools.js'
 import { registerExportReportTool } from './tools/investigate/export-report-tool.js'
@@ -27,6 +28,7 @@ export function createServer(): McpServer {
   registerSearchEventsTool(server)
   registerQueryMetricsTool(server)
   registerListMonitorsTool(server)
+  registerCompareWindowsTool(server)
   registerRunInvestigationTool(server)
   registerGetSessionLogsTool(server)
   registerExportReportTool(server)
