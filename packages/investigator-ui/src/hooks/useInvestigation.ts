@@ -11,6 +11,12 @@ export interface DraftParams {
   from: string
   to: string
   groupBy?: string
+  /** Fetch Datadog events for the window; inherited from the session when omitted */
+  includeEvents?: boolean
+  /** Events search query; inherited from the session when omitted */
+  eventsQuery?: string
+  /** Metric queries to fetch alongside logs. Inherited when omitted; [] clears them. */
+  metricsQueries?: string[]
 }
 
 export function useInvestigation() {
@@ -89,6 +95,11 @@ export function useInvestigation() {
         from: current.params.from,
         to: current.params.to,
         groupBy: current.params.groupBy,
+        // Cross-source settings are part of the window too: without them a
+        // load-more would re-run under whatever the session last inherited.
+        includeEvents: current.params.includeEvents,
+        eventsQuery: current.params.eventsQuery,
+        metricsQueries: current.params.metricsQueries,
         cursor: current.nextCursor,
       })
       setResult(next)

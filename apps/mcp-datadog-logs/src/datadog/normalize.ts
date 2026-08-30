@@ -77,6 +77,20 @@ export interface RawEvent {
   }
 }
 
+/** Structural subset of the Datadog SDK MonitorSearchResult type (v1.MonitorsApi). */
+export interface RawMonitor {
+  id?: number
+  name?: string
+  /** Alert | Warn | No Data | OK | Ignored | Skipped | Unknown */
+  status?: string
+  /** Epoch SECONDS, not milliseconds */
+  lastTriggeredTs?: number
+  query?: string
+  tags?: string[]
+  type?: string
+  scopes?: string[]
+}
+
 /** Structural subset of the Datadog SDK MetricsQueryMetadata type (v1.MetricsApi). */
 export interface RawMetricSeries {
   metric?: string

@@ -1,4 +1,5 @@
 import type { EventMarker, InvestigationResult, LogRow, TimelineBucket } from '@kajidog/investigation-shared'
+import { formatComparisonLines } from '../comparison-summary.js'
 import { formatMetricStatsLine } from '../query-metrics.js'
 
 export interface SummaryOptions {
@@ -44,6 +45,13 @@ export function formatInvestigationSummary(
     const more = restValues > 0 ? ` +${restValues} more` : ''
     const other = facet.otherCount ? `, (other) ${facet.otherCount.toLocaleString('en-US')}` : ''
     lines.push(`${facet.facet}: ${top}${more}${other}`)
+  }
+
+  // Every comparison line is inside this guard: a result without a comparison
+  // must render byte-for-byte as it did before the field existed.
+  if (result.comparison) {
+    // compact: the query and the target range are already on the lines above.
+    lines.push(...formatComparisonLines(result.comparison, { compact: true }))
   }
 
   const events = result.events ?? []

@@ -46,6 +46,9 @@ export async function runAndStoreInvestigation(opts: StoreRunOptions): Promise<S
     includeEvents: opts.params.includeEvents ?? existing?.result.params.includeEvents,
     eventsQuery: opts.params.eventsQuery ?? existing?.result.params.eventsQuery,
     metricsQueries: opts.params.metricsQueries ?? existing?.result.params.metricsQueries,
+    baseline: opts.params.baseline ?? existing?.result.params.baseline,
+    baselineFrom: opts.params.baselineFrom ?? existing?.result.params.baselineFrom,
+    baselineTo: opts.params.baselineTo ?? existing?.result.params.baselineTo,
   }
   const { result, rawById } = await runInvestigation(client, params)
 
@@ -57,13 +60,16 @@ export async function runAndStoreInvestigation(opts: StoreRunOptions): Promise<S
         rawById.set(id, raw)
       }
     }
-    // Load-more skips the events/metrics fetches (frozen window, unchanged
-    // data) — carry the previous page's results forward instead.
+    // Load-more skips the events/metrics/comparison fetches (frozen window,
+    // unchanged data) — carry the previous page's results forward instead.
     if (existing.result.events && !result.events) {
       result.events = existing.result.events
     }
     if (existing.result.metrics && !result.metrics) {
       result.metrics = existing.result.metrics
+    }
+    if (existing.result.comparison && !result.comparison) {
+      result.comparison = existing.result.comparison
     }
     if (existing.result.notices && !result.notices) {
       result.notices = existing.result.notices

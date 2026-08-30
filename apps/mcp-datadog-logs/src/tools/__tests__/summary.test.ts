@@ -1,9 +1,38 @@
+import type { ComparisonResult } from '@kajidog/investigation-shared'
 import { VIEW_UUID_PATTERN } from '@kajidog/investigation-shared'
 import { describe, expect, it } from 'vitest'
 import { formatInvestigationSummary } from '../investigate/summary.js'
 import { fixtureResult, fixtureRow } from './fixtures.js'
 
 const VIEW_UUID = '11111111-2222-3333-4444-555555555555'
+
+function fixtureComparison(overrides: Partial<ComparisonResult> = {}): ComparisonResult {
+  return {
+    params: { query: 'service:payments status:error', mode: 'shift', shift: '1d', facets: ['service'] },
+    target: {
+      fromMs: Date.parse('2026-07-06T09:10:00Z'),
+      toMs: Date.parse('2026-07-06T10:10:00Z'),
+      totalCount: 1234,
+      statusCounts: { error: 120, info: 1114 },
+      errorRate: 0.0972,
+    },
+    baseline: {
+      fromMs: Date.parse('2026-07-05T09:10:00Z'),
+      toMs: Date.parse('2026-07-05T10:10:00Z'),
+      totalCount: 600,
+      statusCounts: { error: 12, info: 588 },
+      errorRate: 0.02,
+    },
+    interval: '5m',
+    volume: {
+      total: { targetCount: 1234, baselineCount: 600, delta: 634, ratio: 2.06 },
+      byStatus: [{ status: 'error', targetCount: 120, baselineCount: 12, delta: 108, ratio: 10 }],
+      errorRateDelta: 0.0772,
+    },
+    fetchedAt: '2026-07-06T10:10:00.000Z',
+    ...overrides,
+  }
+}
 
 describe('formatInvestigationSummary', () => {
   it('starts with the viewUUID contract line', () => {
@@ -153,6 +182,45 @@ describe('formatInvestigationSummary', () => {
   it('prefixes notices with Note:', () => {
     const summary = formatInvestigationSummary(fixtureResult({ notices: ['Events unavailable: 403'] }), VIEW_UUID)
     expect(summary).toContain('Note: Events unavailable: 403')
+  })
+
+  it('splices the comparison in without its header line', () => {
+    const summary = formatInvestigationSummary(fixtureResult({ comparison: fixtureComparison() }), VIEW_UUID)
+    expect(summary).toContain('Volume: 1,234 vs 600 (+634, 2.06x)')
+    expect(summary).toContain('Error rate: 9.7% vs 2.0% (+7.7 pts)')
+    expect(summary).toContain('error 120 vs 12 (+108, 10.0x)')
+    // compact mode: the query and range are already on the summary's own lines.
+    expect(summary).not.toContain('Comparison: ')
+  })
+
+  it('renders comparison notices and attribution when present', () => {
+    const comparison = fixtureComparison({
+      facets: [
+        {
+          facet: 'service',
+          values: [
+            {
+              value: 'payments',
+              targetCount: 900,
+              baselineCount: 100,
+              targetShare: 0.73,
+              baselineShare: 0.17,
+              excess: 694,
+              lift: 4.3,
+            },
+          ],
+          targetCovered: 1234,
+          baselineCovered: 600,
+          targetTotal: 1234,
+          baselineTotal: 600,
+        },
+      ],
+      notices: ['The baseline window holds only 600 logs.'],
+    })
+    const summary = formatInvestigationSummary(fixtureResult({ comparison }), VIEW_UUID)
+    expect(summary).toContain('service attribution')
+    expect(summary).toContain('payments 900 vs 100')
+    expect(summary).toContain('Note: The baseline window holds only 600 logs.')
   })
 
   it('produces byte-identical output for results without cross-source fields', () => {

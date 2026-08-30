@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { registerAggregateLogsTool } from './tools/aggregate-logs.js'
+import { registerCompareWindowsTool } from './tools/compare-windows.js'
 import { registerGetTraceTool } from './tools/get-trace.js'
 import { registerInvestigateAppTools } from './tools/investigate/app-tools.js'
 import { registerExportReportTool } from './tools/investigate/export-report-tool.js'
@@ -7,6 +8,7 @@ import { registerGetSessionLogsTool } from './tools/investigate/get-session-logs
 import { registerInvestigateTool } from './tools/investigate/investigate-tool.js'
 import { registerInvestigatorResource } from './tools/investigate/resource.js'
 import { registerRunInvestigationTool } from './tools/investigate/run-investigation-tool.js'
+import { registerListMonitorsTool } from './tools/list-monitors.js'
 import { registerQueryMetricsTool } from './tools/query-metrics.js'
 import { registerSearchEventsTool } from './tools/search-events.js'
 import { registerSearchLogsTool } from './tools/search-logs.js'
@@ -25,6 +27,8 @@ export function createServer(): McpServer {
   registerGetTraceTool(server)
   registerSearchEventsTool(server)
   registerQueryMetricsTool(server)
+  registerListMonitorsTool(server)
+  registerCompareWindowsTool(server)
   registerRunInvestigationTool(server)
   registerGetSessionLogsTool(server)
   registerExportReportTool(server)

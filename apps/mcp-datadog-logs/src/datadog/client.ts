@@ -1,7 +1,7 @@
 import { client, v1, v2 } from '@datadog/datadog-api-client'
 import type { DatadogConfig } from '../config.js'
 import { getDatadogConfig } from '../config.js'
-import type { RawAggregateBucket, RawEvent, RawLog, RawMetricSeries, RawSpan } from './normalize.js'
+import type { RawAggregateBucket, RawEvent, RawLog, RawMetricSeries, RawMonitor, RawSpan } from './normalize.js'
 
 export interface SearchLogsParams {
   query: string
@@ -52,14 +52,31 @@ export interface QueryMetricsParams {
   toSec: number
 }
 
+export interface SearchMonitorsParams {
+  /** Datadog monitor search query, e.g. 'status:Alert tag:"service:web"' */
+  query: string
+  /** 0-based page index. Default 0. */
+  page?: number
+  perPage: number
+  /** API sort key, e.g. "status,asc". Only name/status/tags are supported by the API. */
+  sort?: string
+}
+
+export interface SearchMonitorsResult {
+  monitors: RawMonitor[]
+  /** Total monitors matching the query across all pages, when Datadog reports it. */
+  totalCount?: number
+}
+
 const SPANS_PAGE_LIMIT = 200
 
-/** Datadog API client wrapper. Despite the name it also covers spans, events, and metrics. */
+/** Datadog API client wrapper. Despite the name it also covers spans, events, metrics, and monitors. */
 export class DatadogLogsClient {
   private readonly api: v2.LogsApi
   private readonly spansApi: v2.SpansApi
   private readonly eventsApi: v2.EventsApi
   private readonly metricsApi: v1.MetricsApi
+  private readonly monitorsApi: v1.MonitorsApi
   private readonly indexes?: string[]
   readonly site: string
 
@@ -81,6 +98,7 @@ export class DatadogLogsClient {
     this.spansApi = new v2.SpansApi(configuration)
     this.eventsApi = new v2.EventsApi(configuration)
     this.metricsApi = new v1.MetricsApi(configuration)
+    this.monitorsApi = new v1.MonitorsApi(configuration)
     this.indexes = config.indexes
     this.site = config.site
   }
@@ -200,6 +218,28 @@ export class DatadogLogsClient {
     })
     return (response.data ?? []) as RawEvent[]
   }
+
+  /**
+   * Single page of monitors matching a monitor search query (searchMonitors —
+   * unlike listMonitors it paginates and returns the flat status /
+   * lastTriggeredTs fields).
+   *
+   * this.filter() / DD_LOGS_INDEXES deliberately does not apply here: monitors
+   * are not stored in log indexes, so index scoping is meaningless for them.
+   */
+  async searchMonitors(params: SearchMonitorsParams): Promise<SearchMonitorsResult> {
+    const response = await this.monitorsApi.searchMonitors({
+      query: params.query,
+      page: params.page ?? 0,
+      perPage: params.perPage,
+      ...(params.sort ? { sort: params.sort } : {}),
+    })
+    const totalCount = response.metadata?.totalCount
+    return {
+      monitors: (response.monitors ?? []) as RawMonitor[],
+      ...(totalCount !== undefined ? { totalCount } : {}),
+    }
+  }
 }
 
 let cached: DatadogLogsClient | undefined
@@ -221,7 +261,7 @@ export function resetDatadogClient(): void {
  * Maps Datadog API failures to actionable messages for the model/user.
  * `requiredScope` names the application-key scope the failing API needs
  * (logs tools: logs_read_data, spans: apm_read, events: events_read,
- * metrics: timeseries_query).
+ * metrics: timeseries_query, monitors: monitors_read).
  */
 export function describeDatadogError(error: unknown, requiredScope = 'logs_read_data'): string {
   const err = error as { code?: number; message?: string } | undefined
@@ -252,7 +292,11 @@ export function describeDatadogError(error: unknown, requiredScope = 'logs_read_
     return `Could not reach the Datadog API. Check network access and DD_SITE. Details: ${message}`
   }
   // Config/validation errors raised by this server already carry actionable text.
-  if (/credentials are not configured|Unrecognized time value|Invalid time range/.test(message)) {
+  if (
+    /credentials are not configured|Unrecognized time value|Invalid time range|Unrecognized baseline|Invalid baseline/.test(
+      message
+    )
+  ) {
     return message
   }
   return `Datadog API error: ${message}`

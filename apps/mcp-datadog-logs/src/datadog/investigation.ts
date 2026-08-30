@@ -1,5 +1,7 @@
 import type {
+  ComparisonResult,
   EventMarker,
+  FacetBreakdown,
   InvestigationParams,
   InvestigationResult,
   LogRow,
@@ -9,6 +11,7 @@ import type {
 import { getServerConfig, HARD_MAX_ROWS } from '../config.js'
 import type { DatadogLogsClient } from './client.js'
 import { describeDatadogError } from './client.js'
+import { runComparison } from './comparison.js'
 import type { RawAggregateBucket, RawLog } from './normalize.js'
 import {
   DEFAULT_CAPS,
@@ -32,11 +35,25 @@ const MAX_EVENTS = 30
 const MAX_METRICS_QUERIES = 4
 const MAX_TRACE_CANDIDATES = 5
 const TRACE_SAMPLE_MESSAGE_LENGTH = 120
+/**
+ * Facets the baseline comparison attributes the change to. Passed to
+ * runComparison explicitly so the facets re-fetched for the target window can
+ * never drift from the ones the comparison asks the baseline window for.
+ */
+const COMPARISON_FACETS = ['service']
+/**
+ * Facet values fetched for the comparison's target window. Must match the cap
+ * runComparison uses for the baseline window (see PrecomputedTargetWindow):
+ * the investigation's own breakdowns stop at DEFAULT_CAPS.maxFacetValues, and
+ * feeding those in would report the baseline's tail as newly appeared.
+ */
+const COMPARISON_FACET_VALUES = 100
 
 /**
  * Runs the full investigation pipeline: one page of logs, a status-grouped
  * timeseries for the timeline chart, per-facet total counts, and — unless
- * this is a load-more page — events and metric series for the same window.
+ * this is a load-more page — events, metric series and a baseline comparison
+ * for the same window.
  */
 export async function runInvestigation(
   client: DatadogLogsClient,
@@ -122,13 +139,75 @@ export async function runInvestigation(
 
   const rows = search.logs.map((log) => normalizeLogRow(log, caps))
   const traceCandidates = extractTraceCandidates(rows)
+  const timeline = normalizeTimeline(timeseriesBuckets, caps)
+
+  // A baseline comparison runs only when the caller asked for one, so an
+  // investigation that did not issues exactly the requests it always did.
+  // Load-more pages skip it for the same reason events and metrics are
+  // skipped: the window is frozen and session-ops carries the previous
+  // comparison forward.
+  let comparison: ComparisonResult | undefined
+  const wantsComparison = Boolean(params.baseline || params.baselineFrom || params.baselineTo)
+  if (wantsComparison && !params.cursor) {
+    let comparisonFacets: FacetBreakdown[] | undefined
+    try {
+      const breakdowns: FacetBreakdown[] = []
+      for (const facet of COMPARISON_FACETS) {
+        const buckets = await client.aggregateByFacet({ ...base, facet, limit: COMPARISON_FACET_VALUES })
+        breakdowns.push(normalizeFacet(facet, buckets, { ...caps, maxFacetValues: COMPARISON_FACET_VALUES }))
+      }
+      comparisonFacets = breakdowns
+    } catch (error) {
+      // Without them the comparison still reports volume, patterns and onset;
+      // it adds its own notice for the facets it could not compare.
+      notices.push(`Comparison facet attribution unavailable: ${describeDatadogError(error)}`)
+    }
+    try {
+      comparison = await runComparison(client, {
+        query: params.query,
+        from: params.from,
+        to: params.to,
+        ...(params.baseline !== undefined ? { baseline: params.baseline } : {}),
+        ...(params.baselineFrom !== undefined ? { baselineFrom: params.baselineFrom } : {}),
+        ...(params.baselineTo !== undefined ? { baselineTo: params.baselineTo } : {}),
+        // scope '' = no extra filter on either window's pattern sample. The
+        // rows handed over below were fetched with the investigation's query
+        // alone, so the default 'status:error' would diff an all-status target
+        // sample against an errors-only baseline sample.
+        scope: '',
+        facets: COMPARISON_FACETS,
+        // Same page size on both sides, so the sampled templates of the two
+        // windows are drawn at the same depth.
+        sampleLimit: limit,
+        // With no target rows to reuse there is nothing to diff against: every
+        // baseline template would read as "gone". Skipping also saves the
+        // baseline's sample request.
+        includePatterns: rows.length > 0,
+        precomputedTarget: {
+          range: resolved,
+          interval,
+          // Statuses are a closed set well under maxFacetValues, so this
+          // breakdown carries the whole window total despite the lower cap.
+          statusFacet: statusFacet ?? { facet: 'status', values: [] },
+          timeline,
+          rows,
+          rowsTruncated: search.logs.length >= limit,
+          ...(events !== undefined ? { events } : {}),
+          ...(comparisonFacets !== undefined ? { facets: comparisonFacets } : {}),
+        },
+      })
+    } catch (error) {
+      // A failed comparison is one missing section, never a failed investigation.
+      notices.push(`Baseline comparison unavailable: ${describeDatadogError(error)}`)
+    }
+  }
 
   // Cross-source fields are spread conditionally so an investigation that
   // doesn't use them produces the exact same result shape as before.
   const result: InvestigationResult = {
     params: { ...params, limit },
     totalCount,
-    timeline: normalizeTimeline(timeseriesBuckets, caps),
+    timeline,
     interval: interval.label,
     facets: facetBreakdowns,
     rows,
@@ -138,6 +217,7 @@ export async function runInvestigation(
     ...(events !== undefined ? { events } : {}),
     ...(metrics !== undefined ? { metrics } : {}),
     ...(traceCandidates.length > 0 ? { traceCandidates } : {}),
+    ...(comparison ? { comparison } : {}),
     ...(notices.length > 0 ? { notices } : {}),
   }
 

@@ -53,6 +53,26 @@ export function registerInvestigateTool(server: McpServer): void {
           .describe(
             'Metric queries to show alongside logs (classic syntax), e.g. ["avg:system.cpu.user{service:web}"]'
           ),
+        baseline: z
+          .string()
+          .optional()
+          .describe(
+            'Also compare the window against a baseline window and include the deltas in the summary: "previous" ' +
+              '(the window immediately before the target), a shift back by the same duration ("1d", "1w"), or a ' +
+              'time-math start ("now-1d"). Costs ~5 extra Datadog requests, so ask for it to establish whether the ' +
+              'window is abnormal — not on every run.'
+          ),
+        baselineFrom: z
+          .string()
+          .optional()
+          .describe(
+            'Explicit baseline window start; overrides "baseline" and is honoured on its own (baselineTo then ' +
+              "defaults to a window of the target's length). Same ~5 extra Datadog requests."
+          ),
+        baselineTo: z
+          .string()
+          .optional()
+          .describe('Explicit baseline window end; honoured on its own. Same ~5 extra Datadog requests.'),
       },
       annotations: {
         readOnlyHint: true,
@@ -71,6 +91,9 @@ export function registerInvestigateTool(server: McpServer): void {
       includeEvents,
       eventsQuery,
       metricsQueries,
+      baseline,
+      baselineFrom,
+      baselineTo,
     }: {
       query: string
       from: string
@@ -82,6 +105,9 @@ export function registerInvestigateTool(server: McpServer): void {
       includeEvents?: boolean
       eventsQuery?: string
       metricsQueries?: string[]
+      baseline?: string
+      baselineFrom?: string
+      baselineTo?: string
     }): Promise<CallToolResult> => {
       try {
         // Display path: show an existing session without touching Datadog.
@@ -123,7 +149,19 @@ export function registerInvestigateTool(server: McpServer): void {
         }
 
         const stored = await runAndStoreInvestigation({
-          params: { query, from, to, groupBy, title, includeEvents, eventsQuery, metricsQueries },
+          params: {
+            query,
+            from,
+            to,
+            groupBy,
+            title,
+            includeEvents,
+            eventsQuery,
+            metricsQueries,
+            baseline,
+            baselineFrom,
+            baselineTo,
+          },
           findings,
         })
         return {

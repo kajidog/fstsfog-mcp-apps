@@ -24,6 +24,9 @@ describe('createServer tool registration', () => {
         'datadog_aggregate_logs',
         'datadog_get_trace',
         'datadog_search_events',
+        'datadog_query_metrics',
+        'datadog_list_monitors',
+        'datadog_compare_windows',
         'datadog_run_investigation',
         'datadog_get_session_logs',
         'datadog_export_report',
@@ -31,6 +34,7 @@ describe('createServer tool registration', () => {
         '_get_view_state',
         '_run_investigation',
         '_get_log_detail',
+        '_get_trace',
         '_export_report',
       ])
     )
@@ -38,7 +42,7 @@ describe('createServer tool registration', () => {
     // investigate tool opens the UI
     expect(tools.datadog_investigate_logs._meta?.ui?.resourceUri).toBe('ui://datadog-logs/investigator.html')
     // app-only tools are hidden from the model
-    for (const name of ['_get_view_state', '_run_investigation', '_get_log_detail', '_export_report']) {
+    for (const name of ['_get_view_state', '_run_investigation', '_get_log_detail', '_get_trace', '_export_report']) {
       expect(tools[name]._meta?.ui?.visibility, name).toEqual(['app'])
     }
     // model-facing search tools do not open the UI
@@ -46,6 +50,11 @@ describe('createServer tool registration', () => {
     // trace/event correlation tools are model-facing and must not open the UI
     expect(tools.datadog_get_trace._meta?.ui).toBeUndefined()
     expect(tools.datadog_search_events._meta?.ui).toBeUndefined()
+    // metric/monitor correlation tools are model-facing and must not open the UI
+    expect(tools.datadog_query_metrics._meta?.ui).toBeUndefined()
+    expect(tools.datadog_list_monitors._meta?.ui).toBeUndefined()
+    // baseline comparison is model-facing and must not open the UI
+    expect(tools.datadog_compare_windows._meta?.ui).toBeUndefined()
     // headless investigation tool is model-facing and must not open the UI
     expect(tools.datadog_run_investigation._meta?.ui).toBeUndefined()
     // session drill-down tool is model-facing and must not open the UI

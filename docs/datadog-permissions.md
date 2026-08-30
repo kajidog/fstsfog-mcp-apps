@@ -2,11 +2,11 @@
 
 このドキュメントは、`apps/mcp-datadog-logs` の各 MCP ツールが Datadog API を呼び出すために必要な Application Key 権限をまとめたものです。
 
-最終確認日: 2026-07-14
+最終確認日: 2026-08-27
 
 ## 前提
 
-`apps/mcp-datadog-logs` は Datadog の Logs / Spans / Events / Metrics API を直接呼び出します。認証には次の3つを使います。
+`apps/mcp-datadog-logs` は Datadog の Logs / Spans / Events / Metrics / Monitors API を直接呼び出します。認証には次の3つを使います。
 
 - `DD_API_KEY`
 - `DD_APP_KEY`
@@ -27,13 +27,14 @@ Application Key を scoped key として作る場合は、下記の権限を付�
 
 Datadog の権限ドキュメントでは、ログデータを読むには `logs_read_data` と Logs Read Index Data の両方が必要とされています。
 
-trace / イベント / メトリクス系ツールも使う場合は、追加で次の権限が必要です。
+trace / イベント / メトリクス / モニター系ツールも使う場合は、追加で次の権限が必要です。
 
 | 権限 | 用途 |
 |---|---|
 | `apm_read` | APM スパンの読み取り(`datadog_get_trace`) |
 | `events_read` | イベントの読み取り(`datadog_search_events`、調査ツールのイベント重畳) |
 | `timeseries_query` | メトリクス timeseries の読み取り(`datadog_query_metrics`、調査ツールの `metricsQueries`) |
+| `monitors_read` | モニター定義と状態の読み取り(`datadog_list_monitors`) |
 
 調査ツール(`datadog_run_investigation` / `datadog_investigate_logs` / `_run_investigation`)は `events_read` / `timeseries_query` が無くても失敗しません。該当データの取得だけをスキップし、結果の `notices` にその旨を記録します(graceful degradation)。
 
@@ -56,11 +57,16 @@ trace / イベント / メトリクス系ツールも使う場合は、追加で
 | `datadog_get_trace` | `v2.SpansApi.listSpans` | trace_id からスパン検索 | `apm_read` | model-facing tool。403 時は `apm_read` を案内 |
 | `datadog_search_events` | `v2.EventsApi.searchEvents` | イベント検索(deployment/monitor 等) | `events_read` | model-facing tool。403 時は `events_read` を案内 |
 | `datadog_query_metrics` | `v1.MetricsApi.queryMetrics` | メトリクス timeseries クエリ | `timeseries_query` | model-facing tool。403 時は `timeseries_query` を案内 |
-| `datadog_run_investigation` | `v2.LogsApi.listLogs`, `v2.LogsApi.aggregateLogs` (+ `v2.EventsApi.searchEvents`, `v1.MetricsApi.queryMetrics`) | UI を開かない調査(結果はサーバー側セッションに保存) | `logs_read_data`, `logs_read_index_data`(任意: `events_read`, `timeseries_query`) | model-facing tool。モデルには要約のみ返す。イベント/メトリクスは権限が無ければスキップして `notices` に記録 |
-| `datadog_investigate_logs` | `v2.LogsApi.listLogs`, `v2.LogsApi.aggregateLogs` (+ `v2.EventsApi.searchEvents`, `v1.MetricsApi.queryMetrics`) | 調査 UI 用の初回検索/集計 | `logs_read_data`, `logs_read_index_data`(任意: `events_read`, `timeseries_query`) | model-facing tool。UI を開く。`viewUUID` 指定時は API 呼び出しなしで保存済みセッションを表示 |
+| `datadog_list_monitors` | `v1.MonitorsApi.searchMonitors` | モニターの一覧/状態確認(state / tag / name / 生クエリで絞り込み) | `monitors_read` | model-facing tool。403 時は `monitors_read` を案内。`DD_LOGS_INDEXES` は適用されない(モニターにインデックスの概念が無いため) |
+| `datadog_compare_windows` | `v2.LogsApi.aggregateLogs`, `v2.LogsApi.listLogs` (+ `v2.EventsApi.searchEvents`) | 対象ウィンドウとベースラインウィンドウの比較(件数/エラー率の差分、メッセージテンプレートの差分、ファセット寄与、立ち上がり時刻) | `logs_read_data`, `logs_read_index_data`(任意: `events_read`) | model-facing tool。1回の呼び出しで Datadog API を最大13リクエスト(既定値では9)発行する。イベント取得(`include_events`)は `events_read` が無くても失敗せず `notices` に記録してスキップ。`viewUUID` を渡すと既存の調査セッションに比較結果を添付する |
+| `datadog_run_investigation` | `v2.LogsApi.listLogs`, `v2.LogsApi.aggregateLogs` (+ `v2.EventsApi.searchEvents`, `v1.MetricsApi.queryMetrics`) | UI を開かない調査(結果はサーバー側セッションに保存) | `logs_read_data`, `logs_read_index_data`(任意: `events_read`, `timeseries_query`) | model-facing tool。モデルには要約のみ返す。イベント/メトリクスは権限が無ければスキップして `notices` に記録。`baseline` / `baselineFrom` / `baselineTo` を指定するとベースライン比較が走り、Datadog API リクエストが約5増える |
+| `datadog_get_session_logs` | なし | 保存済みセッションの行を絞り込み/1件の raw log を取得 | なし | model-facing tool。Datadog へ再問い合わせしない(調査時に取得済みの行だけを読む) |
+| `datadog_export_report` | なし | 保存済み調査結果を HTML / CSV / JSON でファイル出力 | なし | model-facing tool。`getDatadogClient().site` を表示用に読むが API 呼び出しはしない |
+| `datadog_investigate_logs` | `v2.LogsApi.listLogs`, `v2.LogsApi.aggregateLogs` (+ `v2.EventsApi.searchEvents`, `v1.MetricsApi.queryMetrics`) | 調査 UI 用の初回検索/集計 | `logs_read_data`, `logs_read_index_data`(任意: `events_read`, `timeseries_query`) | model-facing tool。UI を開く。`viewUUID` 指定時は API 呼び出しなしで保存済みセッションを表示。`baseline` 系の引数を指定した場合は約5リクエスト増える |
 | `_get_view_state` | なし | 保存済み view state の取得 | なし | app-only tool。Datadog へ再問い合わせしない |
-| `_run_investigation` | `v2.LogsApi.listLogs`, `v2.LogsApi.aggregateLogs` (+ `v2.EventsApi.searchEvents`, `v1.MetricsApi.queryMetrics`) | UI からの再検索/集計 | `logs_read_data`, `logs_read_index_data`(任意: `events_read`, `timeseries_query`) | app-only tool |
+| `_run_investigation` | `v2.LogsApi.listLogs`, `v2.LogsApi.aggregateLogs` (+ `v2.EventsApi.searchEvents`, `v1.MetricsApi.queryMetrics`) | UI からの再検索/集計 | `logs_read_data`, `logs_read_index_data`(任意: `events_read`, `timeseries_query`) | app-only tool。UI からベースライン比較を指定した場合は約5リクエスト増える |
 | `_get_log_detail` | なし | 保存済み raw log の取得 | なし | app-only tool。Datadog へ再問い合わせしない |
+| `_get_trace` | `v2.SpansApi.listSpans` | ログテーブルの trace_id から APM トレースを展開 | `apm_read` | app-only tool。時間窓はセッションの `resolvedRange` から前後30分パディングして導出し、trace_id がそのセッションの行/トレース候補に含まれることを検証する(汎用の trace 取得プロキシにしないため)。403 時は `apm_read` を案内 |
 | `_export_report` | なし | 保存済み調査結果の HTML 出力 | なし | app-only tool。`getDatadogClient().site` を表示用に読むが API 呼び出しはしない |
 
 ## 新しいツールを追加するとき

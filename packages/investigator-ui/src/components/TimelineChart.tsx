@@ -1,7 +1,8 @@
 import type { EventMarker, EventMarkerKind, TimelineBucket } from '@kajidog/investigation-shared'
-import { useMemo } from 'react'
-import { Bar, BarChart, CartesianGrid, Cell, ReferenceLine, XAxis, YAxis } from 'recharts'
+import { useMemo, useState } from 'react'
+import { Bar, BarChart, CartesianGrid, Cell, ReferenceArea, ReferenceLine, XAxis, YAxis } from 'recharts'
 import { type ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
+import { computeRangeFromDrag, snapToBucket } from '@/lib/timeline'
 
 /** Bottom-to-top stack order; statuses outside this set fold into "other". */
 const STACK_ORDER = ['debug', 'info', 'warn', 'error'] as const
@@ -20,6 +21,9 @@ const EVENT_COLOR: Record<EventMarkerKind, string> = {
   other: 'var(--event-other)',
 }
 
+/** The onset marker: solid, and the only line drawn in the error colour. */
+const ONSET_COLOR = 'var(--status-error)'
+
 const EVENT_KIND_LABEL: Record<EventMarkerKind, string> = {
   deploy: 'デプロイ',
   alert: 'アラート',
@@ -30,21 +34,34 @@ interface TimelineChartProps {
   timeline: TimelineBucket[]
   interval: string
   rangeMs: number
+  /** End of the investigated window (epoch ms) — caps a dragged range */
+  rangeEndMs: number
   /** Bucket time (ISO) currently selected as a table filter, if any */
   selectedBucket: string | null
   onBucketSelect: (time: string | null) => void
+  /** Drag across buckets: re-query the server for the dragged window (ISO 8601, zoned) */
+  onRangeSelect?: (fromIso: string, toIso: string) => void
   /** Events overlaid as vertical reference lines (snapped to the nearest bucket) */
   events?: EventMarker[]
+  /** Detected onset time (ISO), drawn as its own reference line */
+  onsetTime?: string
 }
 
 export function TimelineChart({
   timeline,
   interval,
   rangeMs,
+  rangeEndMs,
   selectedBucket,
   onBucketSelect,
+  onRangeSelect,
   events,
+  onsetTime,
 }: TimelineChartProps) {
+  // Drag endpoints as bucket times. A press with no move (or a move back onto
+  // the pressed bucket) is a click, and keeps the existing single-bucket toggle.
+  const [dragStart, setDragStart] = useState<string | null>(null)
+  const [dragEnd, setDragEnd] = useState<string | null>(null)
   const { data, keys } = useMemo(() => {
     const present = new Set<string>()
     const rows = timeline.map((bucket) => {
@@ -63,33 +80,32 @@ export function TimelineChart({
   }, [timeline])
 
   // The XAxis is categorical, so ReferenceLine x must be an exact bucket time:
-  // each event snaps to its nearest bucket (positions are bucket ±interval).
+  // each marker snaps to its nearest bucket (positions are bucket ±interval).
+  const buckets = useMemo(
+    () => timeline.map((b) => ({ time: b.time, ms: Date.parse(b.time) })).filter((b) => !Number.isNaN(b.ms)),
+    [timeline]
+  )
+
   const eventLines = useMemo(() => {
     const list = events ?? []
-    const buckets = timeline.map((b) => ({ time: b.time, ms: Date.parse(b.time) })).filter((b) => !Number.isNaN(b.ms))
     if (list.length === 0 || buckets.length === 0) {
       return []
     }
-    const intervalMs = buckets.length > 1 ? buckets[1].ms - buckets[0].ms : 5 * 60_000
-    const firstMs = buckets[0].ms
-    const lastMs = buckets[buckets.length - 1].ms + intervalMs
     const lines: Array<{ key: string; x: string; kind: EventMarkerKind }> = []
     for (const event of list) {
-      const eventMs = Date.parse(event.time)
-      if (Number.isNaN(eventMs) || eventMs < firstMs || eventMs > lastMs) {
+      const x = snapToBucket(buckets, event.time)
+      if (x === null) {
         continue
       }
-      let nearest = buckets[0]
-      for (const bucket of buckets) {
-        if (Math.abs(bucket.ms - eventMs) < Math.abs(nearest.ms - eventMs)) {
-          nearest = bucket
-        }
-      }
-      lines.push({ key: event.id || `${event.time}:${event.kind}`, x: nearest.time, kind: event.kind })
+      lines.push({ key: event.id || `${event.time}:${event.kind}`, x, kind: event.kind })
     }
     return lines
-  }, [events, timeline])
+  }, [events, buckets])
   const eventKinds = useMemo(() => [...new Set(eventLines.map((line) => line.kind))], [eventLines])
+
+  // The onset is the bucket where the error rate starts departing from the
+  // baseline: one line, distinct from the dashed event markers.
+  const onsetLine = useMemo(() => (onsetTime ? snapToBucket(buckets, onsetTime) : null), [onsetTime, buckets])
 
   const withDate = rangeMs > 86_400_000
 
@@ -107,11 +123,47 @@ export function TimelineChart({
         <BarChart
           data={data}
           margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
-          onClick={(state) => {
+          // No onClick handler: recharts fires it after onMouseUp, so wiring both
+          // would run the single-bucket toggle twice per click.
+          onMouseDown={(state) => {
             const label = state?.activeLabel
             if (typeof label === 'string') {
-              onBucketSelect(label === selectedBucket ? null : label)
+              setDragStart(label)
+              setDragEnd(null)
             }
+          }}
+          onMouseMove={(state) => {
+            if (dragStart === null) {
+              return
+            }
+            const label = state?.activeLabel
+            if (typeof label === 'string' && label !== dragEnd) {
+              setDragEnd(label)
+            }
+          }}
+          onMouseUp={() => {
+            const start = dragStart
+            const end = dragEnd
+            setDragStart(null)
+            setDragEnd(null)
+            if (start === null) {
+              return
+            }
+            if (end === null || end === start) {
+              onBucketSelect(start === selectedBucket ? null : start)
+              return
+            }
+            const range = computeRangeFromDrag(start, end, interval, rangeEndMs)
+            if (range) {
+              onRangeSelect?.(range.fromIso, range.toIso)
+            }
+          }}
+          // Leaving the plot cancels the drag; without this a mouseup outside
+          // would leave the preview stuck on screen. (Mouse only for now —
+          // touch drag is a follow-up.)
+          onMouseLeave={() => {
+            setDragStart(null)
+            setDragEnd(null)
           }}
         >
           <CartesianGrid vertical={false} />
@@ -135,6 +187,10 @@ export function TimelineChart({
               strokeWidth={1.5}
             />
           ))}
+          {onsetLine !== null && <ReferenceLine x={onsetLine} stroke={ONSET_COLOR} strokeWidth={2} />}
+          {dragStart !== null && dragEnd !== null && dragEnd !== dragStart && (
+            <ReferenceArea x1={dragStart} x2={dragEnd} fill="var(--status-info)" fillOpacity={0.15} strokeOpacity={0} />
+          )}
           {keys.map((key, i) => (
             <Bar
               key={key}
@@ -163,7 +219,13 @@ export function TimelineChart({
             {EVENT_KIND_LABEL[kind]}
           </span>
         ))}
-        <span className="text-[11px]">バーをクリックするとその時間帯だけ表に表示</span>
+        {onsetLine !== null && (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2.5 w-0.5" style={{ background: ONSET_COLOR }} />
+            異常の始まり
+          </span>
+        )}
+        <span className="text-[11px]">バーをクリックするとその時間帯だけ表に表示 · ドラッグした範囲で再検索</span>
         <span className="ml-auto">{interval} ごと</span>
       </div>
     </div>

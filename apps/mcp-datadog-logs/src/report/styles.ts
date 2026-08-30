@@ -282,6 +282,54 @@ tr:last-child td { border-bottom: none; }
   font-size: 11px;
   color: var(--text-secondary);
 }
+.comparison .compare-meta { color: var(--text-secondary); font-size: 13px; margin: 0 0 12px; }
+.comparison .compare-meta code { background: var(--code-bg); border-radius: 4px; padding: 1px 6px; font-size: 12px; }
+.comparison .tiles { margin-bottom: 12px; }
+.tile .sub { color: var(--text-muted); font-size: 12px; margin-top: 4px; }
+.compare-detail > .subsection + .subsection { margin-top: 20px; }
+.compare-detail h3 { font-size: 13px; margin: 0 0 6px; color: var(--text-primary); }
+.compare-detail .hint { color: var(--text-muted); font-size: 12px; margin: 0 0 8px; }
+.compare-detail .onset-detail { color: var(--text-secondary); font-size: 13px; margin: 0; }
+.compare-detail .value-cell { overflow-wrap: anywhere; }
+.compare-detail .value-cell code { background: var(--code-bg); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+.compare-detail .notices { margin-top: 16px; padding-left: 18px; }
+.onset-events { list-style: none; margin: 10px 0 0; padding: 0; font-size: 13px; }
+.onset-events li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 3px 0;
+}
+.onset-events .rel { color: var(--text-muted); font-size: 12px; min-width: 76px; }
+.onset-events .time { color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
+.onset-events .title { overflow-wrap: anywhere; }
+.onset-events .lead { color: var(--text-muted); font-size: 12px; }
+.diff-badge {
+  display: inline-block;
+  min-width: 66px;
+  text-align: center;
+  border-radius: 5px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+}
+.diff-badge.new { background: var(--status-error); }
+.diff-badge.spiking { background: var(--event-alert); }
+.diff-badge.dropping { background: var(--status-info); }
+.diff-badge.gone, .diff-badge.other { background: var(--status-debug); }
+.flag-badge {
+  display: inline-block;
+  margin-left: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--code-bg);
+}
+.flag-badge.new { color: var(--status-error); border-color: var(--status-error); }
 footer { margin-top: 40px; color: var(--text-muted); font-size: 12px; }
 @media print {
   body { background: #fff; }

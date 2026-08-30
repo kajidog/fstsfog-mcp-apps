@@ -1,10 +1,15 @@
 import type {
+  ComparisonResult,
   EventMarker,
+  FacetAttribution,
   FacetBreakdown,
   InvestigationResult,
   LogPattern,
   LogRow,
   MetricSeries,
+  OnsetEvent,
+  PatternDiff,
+  VolumeComparison,
 } from '@kajidog/investigation-shared'
 import type { RawLog } from '../datadog/normalize.js'
 import { renderMarkdown } from './markdown.js'
@@ -15,6 +20,20 @@ import { eventColor, renderTimelineSvg, stackStatuses, statusColor } from './svg
 
 const MAX_RAW_JSON_CHARS = 4_000
 const KNOWN_STATUS_CLASSES = new Set(['error', 'warn', 'info', 'debug'])
+const KNOWN_EVENT_CLASSES = new Set(['deploy', 'alert', 'other'])
+const MAX_COMPARISON_STATUSES = 6
+const MAX_COMPARISON_PATTERNS = 8
+const MAX_COMPARISON_FACET_VALUES = 5
+const MAX_NEARBY_ONSET_EVENTS = 3
+const MAX_TEMPLATE_CHARS = 160
+const COMPARISON_INTERVAL_UNIT_MS: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }
+/** Badge class per pattern-diff kind: looked up, never interpolated from the data. */
+const PATTERN_KIND_CLASSES: Record<string, string> = {
+  new: 'new',
+  spiking: 'spiking',
+  dropping: 'dropping',
+  gone: 'gone',
+}
 
 export interface ReportOptions {
   title?: string
@@ -63,6 +82,7 @@ export function generateReport(
     </div>
   </header>
   ${renderStatTiles(result)}
+  ${renderComparisonSection(result.comparison, formatTs)}
   ${renderNotices(result.notices)}
   ${renderFindingsSection(result.findings)}
   ${renderTimelineSection(result, timeZone)}
@@ -91,6 +111,307 @@ function renderStatTiles(result: InvestigationResult): string {
     <div class="card tile"><div class="label">Warnings</div><div class="value">${formatCount(count('warn'))}</div></div>
     <div class="card tile"><div class="label">Services</div><div class="value">${formatCount(serviceCount)}</div></div>
   </section>`
+}
+
+/**
+ * Renders the baseline comparison above the notices: it is the headline finding
+ * of an investigation that requested one. Everything here — templates, facet
+ * values, event titles, the query — is log-derived, so it all goes through
+ * escapeHtml, and data-dependent styling is looked up in a table with a safe
+ * default rather than interpolated into markup.
+ */
+function renderComparisonSection(comparison: ComparisonResult | undefined, formatTs: (ms: number) => string): string {
+  if (!comparison || !hasComparisonContent(comparison)) {
+    return ''
+  }
+  const { params, target, baseline, volume } = comparison
+  const mode = params.mode === 'shift' && params.shift ? `shift ${params.shift}` : params.mode
+  const header =
+    `Baseline: ${mode} · Target ${comparisonTime(target.fromMs, formatTs)} → ${comparisonTime(target.toMs, formatTs)}` +
+    ` · Baseline ${comparisonTime(baseline.fromMs, formatTs)} → ${comparisonTime(baseline.toMs, formatTs)}` +
+    ` · buckets ${comparison.interval}`
+  // A large volume ratio with a flat error rate is a traffic surge, not an
+  // incident; the error rate tiles sit next to the volume ones so a reader
+  // cannot see one without the other.
+  const errorWorse = Number.isFinite(volume.errorRateDelta) && volume.errorRateDelta > 0
+  const detail = [
+    renderComparisonStatuses(volume),
+    renderComparisonOnset(comparison, formatTs),
+    renderComparisonPatterns(comparison.patterns),
+    renderComparisonFacets(comparison.facets),
+    renderNotices(comparison.notices),
+  ].join('')
+  return `<section class="comparison">
+    <h2>Baseline comparison</h2>
+    <p class="compare-meta">${escapeHtml(header)}${params.scope ? ` · Pattern scope: <code>${escapeHtml(params.scope)}</code>` : ''}</p>
+    <div class="tiles">
+      <div class="card tile">
+        <div class="label">Target logs</div>
+        <div class="value">${escapeHtml(roundedCount(target.totalCount))}</div>
+        <div class="sub">vs ${escapeHtml(roundedCount(baseline.totalCount))} baseline (${escapeHtml(signedCount(volume.total.delta))})</div>
+      </div>
+      <div class="card tile">
+        <div class="label">Volume change</div>
+        <div class="value">${escapeHtml(ratioText(volume.total.ratio))}</div>
+        <div class="sub">target ÷ baseline</div>
+      </div>
+      <div class="card tile">
+        <div class="label">Error rate</div>
+        <div class="value${errorWorse ? ' error' : ''}">${escapeHtml(percentText(target.errorRate))}</div>
+        <div class="sub">vs ${escapeHtml(percentText(baseline.errorRate))} baseline</div>
+      </div>
+      <div class="card tile">
+        <div class="label">Error rate change</div>
+        <div class="value${errorWorse ? ' error' : ''}">${escapeHtml(ratePointsText(volume.errorRateDelta))}</div>
+        <div class="sub">percentage points</div>
+      </div>
+    </div>
+    ${detail ? `<div class="card compare-detail">${detail}</div>` : ''}
+  </section>`
+}
+
+/** Nothing worth showing when both windows are empty and no sub-analysis landed. */
+function hasComparisonContent(comparison: ComparisonResult): boolean {
+  return (
+    comparison.target.totalCount > 0 ||
+    comparison.baseline.totalCount > 0 ||
+    comparison.onset !== undefined ||
+    (comparison.patterns?.length ?? 0) > 0 ||
+    (comparison.facets ?? []).some((facet) => facet.values.length > 0) ||
+    (comparison.notices?.length ?? 0) > 0
+  )
+}
+
+function renderComparisonStatuses(volume: VolumeComparison): string {
+  const statuses = volume.byStatus
+    .filter((status) => status.targetCount > 0 || status.baselineCount > 0)
+    .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+    .slice(0, MAX_COMPARISON_STATUSES)
+  if (statuses.length === 0) {
+    return ''
+  }
+  const rows = statuses
+    .map((status) => {
+      const statusClass = KNOWN_STATUS_CLASSES.has(status.status) ? status.status : 'other'
+      return `<tr>
+        <td><span class="status-badge ${statusClass}">${escapeHtml(status.status)}</span></td>
+        <td class="num">${escapeHtml(roundedCount(status.targetCount))}</td>
+        <td class="num">${escapeHtml(roundedCount(status.baselineCount))}</td>
+        <td class="num">${escapeHtml(signedCount(status.delta))}</td>
+        <td class="num">${escapeHtml(ratioText(status.ratio))}</td>
+      </tr>`
+    })
+    .join('')
+  return `<div class="subsection">
+    <h3>Volume by status</h3>
+    <table><thead><tr><th>Status</th><th style="text-align:right">Target</th><th style="text-align:right">Baseline</th><th style="text-align:right">Delta</th><th style="text-align:right">Ratio</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+  </div>`
+}
+
+function renderComparisonOnset(comparison: ComparisonResult, formatTs: (ms: number) => string): string {
+  const onset = comparison.onset
+  if (!onset) {
+    return ''
+  }
+  const total = comparisonBucketCount(comparison)
+  const position =
+    total === undefined
+      ? `bucket ${roundedCount(onset.bucketIndex + 1)}`
+      : `bucket ${roundedCount(onset.bucketIndex + 1)}/${roundedCount(total)}`
+  const sigmas = onset.sigmas !== null && Number.isFinite(onset.sigmas) ? `, ${onset.sigmas.toFixed(1)}σ` : ''
+  const tsMs = Date.parse(onset.time)
+  const time = Number.isNaN(tsMs) ? onset.time : formatTs(tsMs)
+  const arithmetic =
+    `${position} · rate ${percentText(onset.errorRate)} vs baseline mean ${percentText(onset.baselineMean)} ` +
+    `±${percentText(onset.baselineStdev)} · threshold ${percentText(onset.threshold)}${sigmas} · ` +
+    `sustained ${roundedCount(onset.sustainedBuckets)} buckets`
+  const events = [
+    ...(onset.precedingEvent ? [{ entry: onset.precedingEvent, label: 'preceded by' }] : []),
+    ...(onset.nearbyEvents ?? []).slice(0, MAX_NEARBY_ONSET_EVENTS).map((entry) => ({ entry, label: 'nearby' })),
+  ]
+  const eventList =
+    events.length === 0
+      ? ''
+      : `<ul class="onset-events">${events.map(({ entry, label }) => renderOnsetEvent(entry, label, formatTs)).join('')}</ul>`
+  return `<div class="subsection">
+    <h3>Onset ${escapeHtml(time)}</h3>
+    <p class="onset-detail">${escapeHtml(arithmetic)}</p>
+    ${eventList}
+  </div>`
+}
+
+function renderOnsetEvent(entry: OnsetEvent, label: string, formatTs: (ms: number) => string): string {
+  const { event } = entry
+  const kindClass = KNOWN_EVENT_CLASSES.has(event.kind) ? event.kind : 'other'
+  const tsMs = Date.parse(event.time)
+  const time = Number.isNaN(tsMs) ? event.time : formatTs(tsMs)
+  // leadTimeMs is onset - event: positive means the event landed first.
+  const relative = entry.leadTimeMs >= 0 ? 'before onset' : 'after onset'
+  const source = event.source ? `${event.source} — ` : ''
+  return `<li>
+    <span class="rel">${escapeHtml(label)}</span>
+    <span class="event-badge ${kindClass}">${escapeHtml(event.kind)}</span>
+    <span class="time">${escapeHtml(time)}</span>
+    <span class="title">${escapeHtml(source)}${escapeHtml(event.title)}</span>
+    <span class="lead">${escapeHtml(`${durationText(entry.leadTimeMs)} ${relative}`)}</span>
+  </li>`
+}
+
+function renderComparisonPatterns(patterns: PatternDiff[] | undefined): string {
+  if (!patterns || patterns.length === 0) {
+    return ''
+  }
+  const shown = patterns.slice(0, MAX_COMPARISON_PATTERNS)
+  const rest = patterns.length - shown.length
+  const rows = shown
+    .map((diff) => {
+      const kindClass = PATTERN_KIND_CLASSES[diff.kind] ?? 'other'
+      const change =
+        diff.kind === 'new'
+          ? `${percentText(diff.targetRatio)} of the target sample`
+          : diff.kind === 'gone'
+            ? `${percentText(diff.baselineRatio)} of the baseline sample`
+            : ratioText(diff.lift)
+      return `<tr>
+        <td><span class="diff-badge ${kindClass}">${escapeHtml(diff.kind.toUpperCase())}</span></td>
+        <td class="num">~${escapeHtml(roundedCount(diff.estimatedTargetCount))}</td>
+        <td class="num">~${escapeHtml(roundedCount(diff.estimatedBaselineCount))}</td>
+        <td class="num">${escapeHtml(change)}</td>
+        <td class="value-cell"><code>${escapeHtml(templateText(diff.template))}</code></td>
+      </tr>`
+    })
+    .join('')
+  return `<div class="subsection">
+    <h3>Changed message patterns${rest > 0 ? ` (top ${escapeHtml(roundedCount(shown.length))})` : ''}</h3>
+    <p class="hint">Window counts extrapolated from the sampled rows.</p>
+    <table><thead><tr><th>Kind</th><th style="text-align:right">Target</th><th style="text-align:right">Baseline</th><th style="text-align:right">Change</th><th>Template</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    ${rest > 0 ? `<p class="hint">+${escapeHtml(roundedCount(rest))} more changed templates</p>` : ''}
+  </div>`
+}
+
+function renderComparisonFacets(facets: FacetAttribution[] | undefined): string {
+  return (facets ?? []).map(renderComparisonFacet).join('')
+}
+
+function renderComparisonFacet(attribution: FacetAttribution): string {
+  if (attribution.values.length === 0) {
+    return ''
+  }
+  const scale = attribution.baselineCovered > 0 ? attribution.targetCovered / attribution.baselineCovered : null
+  const hint =
+    scale === null
+      ? 'The baseline window covers no logs, so every value is new.'
+      : `Excess = occurrences beyond a uniform ${ratioText(scale)} scale-up of the baseline.`
+  const shown = attribution.values.slice(0, MAX_COMPARISON_FACET_VALUES)
+  const rest = attribution.values.length - shown.length
+  const rows = shown
+    .map((value) => {
+      // baselineTruncated means the baseline's tail was cut off, so a 0 count is
+      // a lower bound — calling that value new would be a claim the data cannot
+      // make, which is exactly what the flag exists to prevent.
+      const flag = value.baselineTruncated
+        ? '<span class="flag-badge">rare in baseline</span>'
+        : value.isNew
+          ? '<span class="flag-badge new">NEW</span>'
+          : ''
+      return `<tr>
+        <td class="value-cell">${escapeHtml(value.value)}${flag}</td>
+        <td class="num">${escapeHtml(roundedCount(value.targetCount))}</td>
+        <td class="num">${escapeHtml(roundedCount(value.baselineCount))}</td>
+        <td class="num">${escapeHtml(signedCount(value.excess))}</td>
+        <td class="num">${escapeHtml(percentText(value.targetShare))} vs ${escapeHtml(percentText(value.baselineShare))}</td>
+      </tr>`
+    })
+    .join('')
+  return `<div class="subsection">
+    <h3>${escapeHtml(attribution.facet)} attribution</h3>
+    <p class="hint">${escapeHtml(hint)}</p>
+    <table><thead><tr><th>Value</th><th style="text-align:right">Target</th><th style="text-align:right">Baseline</th><th style="text-align:right">Excess</th><th style="text-align:right">Share</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    ${rest > 0 ? `<p class="hint">+${escapeHtml(roundedCount(rest))} more values</p>` : ''}
+  </div>`
+}
+
+/** Total buckets in the target window, for "bucket 4/60"; undefined when the interval is unparseable. */
+function comparisonBucketCount(comparison: ComparisonResult): number | undefined {
+  const match = comparison.interval.match(/^(\d+)([smhd])$/)
+  const unitMs = match ? COMPARISON_INTERVAL_UNIT_MS[match[2]] : undefined
+  if (!match || unitMs === undefined) {
+    return undefined
+  }
+  const intervalMs = Number(match[1]) * unitMs
+  const span = comparison.target.toMs - comparison.target.fromMs
+  if (!Number.isFinite(span) || intervalMs <= 0 || span <= 0) {
+    return undefined
+  }
+  return Math.ceil(span / intervalMs)
+}
+
+/** Formats an epoch ms boundary, guarding the values Intl would throw on. */
+function comparisonTime(ms: number, formatTs: (ms: number) => string): string {
+  // 8.64e15 is the Date range limit; formatting past it throws.
+  return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? formatTs(ms) : '(unknown)'
+}
+
+/**
+ * A multiplier. `null` on the wire means the baseline side was 0 — rendering it
+ * as a number would print Infinity or NaN, so it is spelled out instead.
+ */
+function ratioText(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return 'new (baseline 0)'
+  }
+  return `${value >= 10 ? value.toFixed(1) : value.toFixed(2)}x`
+}
+
+function roundedCount(value: number): string {
+  return Number.isFinite(value) ? formatCount(Math.round(value)) : '-'
+}
+
+function signedCount(value: number): string {
+  if (!Number.isFinite(value)) {
+    return '-'
+  }
+  const rounded = Math.round(value)
+  return `${rounded > 0 ? '+' : ''}${formatCount(rounded)}`
+}
+
+/** A 0–1 rate as a percentage. */
+function percentText(rate: number): string {
+  return Number.isFinite(rate) ? `${(rate * 100).toFixed(1)}%` : '-'
+}
+
+/** A rate delta in percentage points, always signed. */
+function ratePointsText(delta: number): string {
+  if (!Number.isFinite(delta)) {
+    return '-'
+  }
+  const pts = delta * 100
+  return `${pts > 0 ? '+' : ''}${pts.toFixed(1)} pts`
+}
+
+function durationText(ms: number): string {
+  const abs = Math.abs(ms)
+  if (!Number.isFinite(abs)) {
+    return '?'
+  }
+  if (abs < 60_000) {
+    return `${Math.round(abs / 1000)}s`
+  }
+  if (abs < 3_600_000) {
+    return `${Math.round(abs / 60_000)}m`
+  }
+  if (abs < 86_400_000) {
+    return `${Math.round(abs / 3_600_000)}h`
+  }
+  return `${Math.round(abs / 86_400_000)}d`
+}
+
+function templateText(value: string): string {
+  const collapsed = value.replace(/\s+/g, ' ').trim()
+  return collapsed.length > MAX_TEMPLATE_CHARS ? `${collapsed.slice(0, MAX_TEMPLATE_CHARS)}…` : collapsed
 }
 
 function renderFindingsSection(findings: string | undefined): string {

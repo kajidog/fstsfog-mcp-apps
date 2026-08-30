@@ -25,6 +25,12 @@ export interface InvestigationParams {
   eventsQuery?: string
   /** Metric queries to fetch alongside logs (classic query strings, server caps the count) */
   metricsQueries?: string[]
+  /** Baseline window selector: "previous" (default), "1d", "1w", a shift like "4h" */
+  baseline?: string
+  /** Explicit baseline start (wins over `baseline`); when `baselineTo` is omitted the window matches the target's length */
+  baselineFrom?: string
+  /** Explicit baseline end (Datadog time syntax or ISO 8601) */
+  baselineTo?: string
 }
 
 export interface LogRow {
@@ -130,6 +136,181 @@ export interface LogPattern {
   rowIds: string[]
 }
 
+/** How the baseline window was derived */
+export type BaselineMode = 'previous' | 'shift' | 'custom'
+
+/** Aggregates for one side of a two-window comparison */
+export interface ComparisonWindow {
+  /** Window start (epoch ms) */
+  fromMs: number
+  /** Window end (epoch ms) */
+  toMs: number
+  /** Total logs matching the comparison query in this window */
+  totalCount: number
+  /** Counts keyed by status */
+  statusCounts: Record<string, number>
+  /** errors / totalCount, 0–1; 0 when totalCount is 0 */
+  errorRate: number
+  /** Below the small-sample floor — ratios from this window are noise */
+  lowSample?: boolean
+}
+
+/** Count delta between the target and baseline windows */
+export interface VolumeDelta {
+  targetCount: number
+  baselineCount: number
+  /** targetCount - baselineCount */
+  delta: number
+  /** targetCount / baselineCount; null when baselineCount is 0 (never Infinity) */
+  ratio: number | null
+}
+
+export interface VolumeComparison {
+  /** Delta across the whole window */
+  total: VolumeDelta
+  /** Union of statuses seen in either window; a status missing from one side counts as 0 */
+  byStatus: Array<VolumeDelta & { status: string }>
+  /** target.errorRate - baseline.errorRate, in rate points (-1..1) */
+  errorRateDelta: number
+}
+
+/** Kind of pattern change: appeared / rose / fell / disappeared */
+export type PatternDiffKind = 'new' | 'spiking' | 'dropping' | 'gone'
+
+export interface PatternDiff {
+  /** Normalized template (same clustering as LogPattern.template) */
+  template: string
+  kind: PatternDiffKind
+  /** Share of each window's sampled rows, 0–1 — the only comparable quantity */
+  targetRatio: number
+  baselineRatio: number
+  /** Raw occurrences inside the sample (not the window total) */
+  targetSampleCount: number
+  baselineSampleCount: number
+  /** Ratio extrapolated to the window total */
+  estimatedTargetCount: number
+  estimatedBaselineCount: number
+  /** targetRatio / baselineRatio; null when baselineRatio is 0 */
+  lift: number | null
+  /** A raw message that produced this template */
+  example: string
+  /**
+   * Ids of TARGET-window rows in this pattern. Present only when the comparison
+   * clustered a session's stored rows. Baseline rows are never stored server-side,
+   * so baseline ids are never emitted (_get_log_detail would 404 on them).
+   */
+  targetRowIds?: string[]
+}
+
+/** One facet value, measured by how disproportionately it grew against the baseline */
+export interface FacetAttributionValue {
+  value: string
+  targetCount: number
+  baselineCount: number
+  /** targetCount / targetCovered, 0–1 */
+  targetShare: number
+  /** baselineCount / baselineCovered, 0–1 */
+  baselineShare: number
+  /**
+   * targetCount - baselineCount * (targetCovered / baselineCovered): occurrences
+   * beyond what a uniform scale-up of the baseline predicts. Positive = this value
+   * got disproportionately worse. Sums to ~0 across all values, so a pure traffic
+   * surge leaves every value near zero.
+   */
+  excess: number
+  /** targetShare / baselineShare; null when baselineShare is 0 */
+  lift: number | null
+  /** Absent from the baseline window's fetched values */
+  isNew?: boolean
+  /** The baseline facet fetch was truncated — baselineCount is a lower bound */
+  baselineTruncated?: boolean
+}
+
+/** Attribution analysis for one facet dimension */
+export interface FacetAttribution {
+  /** Facet name, e.g. "service", "@http.status_code" */
+  facet: string
+  /** Ranked by |excess|, positives first */
+  values: FacetAttributionValue[]
+  /** Sum of the fetched facet values in each window */
+  targetCovered: number
+  baselineCovered: number
+  /** Window totals from the status aggregation (never truncated) */
+  targetTotal: number
+  baselineTotal: number
+}
+
+/** An event observed near the onset, with how far ahead of it the event landed */
+export interface OnsetEvent {
+  event: EventMarker
+  /** onset time - event time, ms; positive = the event preceded the onset */
+  leadTimeMs: number
+}
+
+/** Where the error rate starts departing from the baseline and stays there */
+export interface OnsetDetection {
+  /** Bucket start where the sustained departure begins, ISO 8601 */
+  time: string
+  /** Position of that bucket in the timeline */
+  bucketIndex: number
+  /** Error rate at the onset bucket, 0–1 */
+  errorRate: number
+  /** Mean per-bucket error rate over the baseline window */
+  baselineMean: number
+  /** Standard deviation of the baseline per-bucket error rate */
+  baselineStdev: number
+  /** max(baselineMean + K*stdev, baselineMean + absolute floor) */
+  threshold: number
+  /** Consecutive qualifying buckets from the onset */
+  sustainedBuckets: number
+  /** (errorRate - baselineMean) / baselineStdev; null when stdev is 0 */
+  sigmas: number | null
+  /** Nearest event before the onset */
+  precedingEvent?: OnsetEvent
+  /** Other events near the onset, chronological */
+  nearbyEvents?: OnsetEvent[]
+}
+
+/** The comparison's inputs, carried on the result so a run can be reproduced */
+export interface ComparisonParams {
+  /** Datadog logs query both windows are measured with */
+  query: string
+  /**
+   * Extra filter applied to the pattern sample only, e.g. "status:error".
+   * Facet aggregations deliberately stay unscoped: their coverage is measured
+   * against the same window totals the status aggregation produces, and an
+   * error-only facet count against an all-status total would read as truncated
+   * every time, permanently suppressing the "new value" signal.
+   */
+  scope?: string
+  mode: BaselineMode
+  /** Shift applied for mode "shift", e.g. "1d" */
+  shift?: string
+  /** Facets compared for attribution */
+  facets: string[]
+}
+
+export interface ComparisonResult {
+  params: ComparisonParams
+  /** The window under investigation */
+  target: ComparisonWindow
+  /** The window it is measured against */
+  baseline: ComparisonWindow
+  /** Timeline bucket interval used for onset detection, e.g. "5m" */
+  interval: string
+  volume: VolumeComparison
+  /** Message template diffs (from clustering the sampled rows) */
+  patterns?: PatternDiff[]
+  /** Per-facet attribution */
+  facets?: FacetAttribution[]
+  /** Where the degradation started */
+  onset?: OnsetDetection
+  /** ISO 8601 — when this comparison was produced */
+  fetchedAt: string
+  /** Degraded fetches, truncation warnings, small-sample warnings */
+  notices?: string[]
+}
+
 export interface InvestigationResult {
   params: InvestigationParams
   /** Approximate total matching logs (from aggregation) */
@@ -157,6 +338,8 @@ export interface InvestigationResult {
   traceCandidates?: TraceCandidate[]
   /** Human-readable notes about degraded cross-source fetches (missing scopes etc.) */
   notices?: string[]
+  /** Baseline-window comparison, present only when the investigation requested one */
+  comparison?: ComparisonResult
 }
 
 /** Payload of _get_view_state / _run_investigation when the view is unknown */
